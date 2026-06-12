@@ -10,8 +10,8 @@ from aiohttp import web
 # ==========================================
 # 1. НАСТРОЙКИ (ПОДСТАВЬ СВОЙ ТОКЕН)
 # ==========================================
-BOT_TOKEN = "ТВОЙ_ТОКЕН_БОТА_СЮДА"
-ADMIN_ID = 123456789  # Твой личный Telegram ID для получения автобэкапов
+BOT_TOKEN = "8731687908:AAEA3cLNjsivjPGph4iIZl4MGajT0ybMIUQ"
+ADMIN_ID = 481597187  # Твой личный Telegram ID для получения автобэкапов
 EXCEL_FILE = "jewellery_database.xlsx"
 
 bot = Bot(token=BOT_TOKEN)
