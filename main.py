@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import os
 import pandas as pd
+from datetime import datetime
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
@@ -9,7 +10,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
 
 # --- НАСТРОЙКА БОТА ---
-TOKEN = "8731687908:AAEA3cLNjsivjPGph4iIZl4MGajT0ybMIUQ"  # НЕ ЗАБУДЬ ВСТАВИТЬ СВОЙ ТОКЕН ВНУТРЬ КАВЫЧЕК!
+TOKEN = "8731687908:AAEA3cLNjsivjPGph4iIZl4MGajT0ybMIUQ" 
+ADMIN_ID = 481597187  # Твой точный Telegram ID для получения отчетов раз в 3 дня
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -36,7 +38,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- МИКРО-СЕРВЕР ДЛЯ ОБМАНА RENDER (WEB SERVICE) ---
+# --- МИКРО-СЕРВЕР ДЛЯ ОБМАНА RENDER ---
 async def handle(request):
     return web.Response(text="Ювелирный бот успешно запущен и работает в сети!")
 
@@ -45,10 +47,66 @@ async def start_background_web_server():
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Берем порт, который требует Render, или ставим дефолтный 10000
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
+
+# --- ФУНКЦИЯ ФОРМИРОВАНИЯ ПОЛНОГО ОТЧЕТА ---
+def build_full_excel_report():
+    conn = sqlite3.connect('jewelry_orders.db')
+    # Берем ВСЕ заказы из базы (всех мастеров, и активные, и закрытые)
+    df = pd.read_sql_query("SELECT * FROM orders", conn)
+    conn.close()
+    
+    if df.empty:
+        return None
+        
+    # Считаем угар (потери) для завершенных заказов
+    df['Потери (угар), г'] = df['start_weight'] - df['end_weight']
+    df['Потери (угар), г'] = df['Потери (угар), г'].round(3)
+    
+    # Делаем таблицу красивой и понятной для человека
+    df_beauty = df.rename(columns={
+        'id': 'ID Заказа',
+        'telegram_id': 'ID Мастера (ТГ)',
+        'client_name': 'Клиент',
+        'material': 'Материал / Проба',
+        'start_weight': 'Входной вес (г)',
+        'start_stones': 'Планируемые камни',
+        'end_weight': 'Финальный вес (г)',
+        'end_stones': 'Фактические камни',
+        'price': 'Стоимость (руб)',
+        'status': 'Статус заказа'
+    })
+    
+    # Убираем технические колонки с ID фотографий
+    df_beauty = df_beauty.drop(columns=['start_photo_id', 'end_photo_id'], errors='ignore')
+    
+    filename = "Полный_отчет_по_заказам.xlsx"
+    df_beauty.to_excel(filename, index=False)
+    return filename
+
+# --- СИСТЕМА АВТОМАТИЧЕСКИХ ОТЧЕТОВ (РАЗ В 3 ДНЯ) ---
+async def auto_report_task():
+    while True:
+        # В сутках 86400 секунд. 3 дня = 86400 * 3 = 259200 секунд
+        await asyncio.sleep(259200) 
+        
+        filename = build_full_excel_report()
+        if filename and os.path.exists(filename):
+            try:
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+                excel_file = FSInputFile(filename)
+                await bot.send_document(
+                    chat_id=ADMIN_ID, 
+                    document=excel_file, 
+                    caption=f"📊 <b>Автоматический отчет за 3 дня</b>\n📅 Сформирован: {current_time}\n\nВнутри файлы по всем активным и готовым заказам мастерской."
+                )
+            except Exception as e:
+                print(f"Ошибка при отправке автоотчета: {e}")
+            finally:
+                if os.path.exists(filename):
+                    os.remove(filename)
 
 # --- СОСТОЯНИЯ (FSM) ---
 class NewOrder(StatesGroup):
@@ -88,9 +146,9 @@ skip_kb = ReplyKeyboardMarkup(
 
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message):
-    await message.answer("Привет! Я бот-помощник для личного учета ювелирных заказов.", reply_markup=main_kb)
+    await message.answer("Привет! Я бот-помощник для учета ювелирных заказов.", reply_markup=main_kb)
 
-# --- СЦЕНАРИЙ: ВЫГРУЗКА В EXCEL (ТОЛЬКО СВОИ ЗАКАЗЫ) ---
+# --- ВЫГРУЗКА В EXCEL ПО КНОПКЕ (ТОЛЬКО СВОИ ЗАКАЗЫ) ---
 @dp.message(F.text == "📊 Отчет в Excel")
 async def export_to_excel(message: Message):
     await message.answer("🔄 Формирую ваш личный отчет, подождите немного...")
@@ -103,11 +161,9 @@ async def export_to_excel(message: Message):
         await message.answer("Ваша база данных пока пуста. Нечего выгружать.")
         return
     
-    # Считаем угар (потери) для завершенных заказов
     df['Потери (угар), г'] = df['start_weight'] - df['end_weight']
     df['Потери (угар), г'] = df['Потери (угар), г'].round(3)
     
-    # Переименовываем колонки
     df_beauty = df.rename(columns={
         'id': 'ID Заказа',
         'client_name': 'Клиент',
@@ -119,7 +175,6 @@ async def export_to_excel(message: Message):
         'price': 'Стоимость (руб)',
         'status': 'Статус заказа'
     })
-    
     df_beauty = df_beauty.drop(columns=['telegram_id', 'start_photo_id', 'end_photo_id'], errors='ignore')
     
     filename = f"Ювелирные_Заказы_{message.from_user.id}.xlsx"
@@ -127,8 +182,6 @@ async def export_to_excel(message: Message):
     
     excel_file = FSInputFile(filename)
     await message.answer_document(document=excel_file, caption="📋 Вот твой свежий отчет по твоим заказам!")
-    
-    # Удаляем временный файл с сервера
     if os.path.exists(filename):
         os.remove(filename)
 
@@ -245,12 +298,12 @@ async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
     
     fields_ru = {
         "client_name": "новое имя клиента",
-        "material": "новый material/пробу",
+        "material": "новый материал/пробу",
         "start_weight": "новый входной вес",
         "start_stones": "новый список камней",
         "start_photo_id": "новое стартовое фото (отправьте его)"
     }
-    await callback.message.answer(f"Ожиаю {fields_ru[field]}:")
+    await callback.message.answer(f"Ожидаю {fields_ru[field]}:")
     await callback.answer()
 
 @dp.message(EditOrder.waiting_new_value)
@@ -387,7 +440,7 @@ async def show_active_orders(message: Message):
     conn.close()
     
     if not orders:
-        await message.answer("У вас сейчас нет активных заказов в работе.")
+        await message.answer("У вас сейчас нет active-заказов в работе.")
         return
         
     response = "<b>Ваши заказы в работе:</b>\n\n"
@@ -398,15 +451,13 @@ async def show_active_orders(message: Message):
 
 # --- ЗАПУСК БОТА ---
 async def main():
-    # 1. Инициализируем локальную БД
     init_db()
-    
-    # 2. Запускаем фоновый веб-сервер для Render (решает проблему портов)
     await start_background_web_server()
     
-    print("Бот запущен в многопользовательском режиме с поддержкой Render!")
+    # Запускаем фоновый таймер для отчетов раз в 3 дня
+    asyncio.create_task(auto_report_task())
     
-    # 3. Начинаем опрос серверов Telegram
+    print("Бот успешно запущен!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
