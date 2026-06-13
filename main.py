@@ -51,21 +51,19 @@ async def start_background_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-# --- ФУНКЦИЯ ФОРМИРОВАНИЯ ПОЛНОГО ОТЧЕТА ---
+# --- ФУНКЦИЯ ДЛЯ ПЕРЕРАСЧЕТА ПОТЕРЬ ПО НОВОЙ ФОРМУЛЕ (ДЛЯ EXCEL) ---
 def build_full_excel_report():
     conn = sqlite3.connect('jewelry_orders.db')
-    # Берем ВСЕ заказы из базы (всех мастеров, и активные, и закрытые)
     df = pd.read_sql_query("SELECT * FROM orders", conn)
     conn.close()
     
     if df.empty:
         return None
         
-    # Считаем угар (потери) для завершенных заказов
-    df['Потери (угар), г'] = df['start_weight'] - df['end_weight']
-    df['Потери (угар), г'] = df['Потери (угар), г'].round(3)
+    # Формула: (готовый вес * 1.09) - изначальный вес
+    df['Потери (+9%), г'] = (df['end_weight'] * 1.09) - df['start_weight']
+    df['Потери (+9%), г'] = df['Потери (+9%), г'].round(3)
     
-    # Делаем таблицу красивой и понятной для человека
     df_beauty = df.rename(columns={
         'id': 'ID Заказа',
         'telegram_id': 'ID Мастера (ТГ)',
@@ -79,7 +77,6 @@ def build_full_excel_report():
         'status': 'Статус заказа'
     })
     
-    # Убираем технические колонки с ID фотографий
     df_beauty = df_beauty.drop(columns=['start_photo_id', 'end_photo_id'], errors='ignore')
     
     filename = "Полный_отчет_по_заказам.xlsx"
@@ -89,7 +86,6 @@ def build_full_excel_report():
 # --- СИСТЕМА АВТОМАТИЧЕСКИХ ОТЧЕТОВ (РАЗ В 3 ДНЯ) ---
 async def auto_report_task():
     while True:
-        # В сутках 86400 секунд. 3 дня = 86400 * 3 = 259200 секунд
         await asyncio.sleep(259200) 
         
         filename = build_full_excel_report()
@@ -100,7 +96,7 @@ async def auto_report_task():
                 await bot.send_document(
                     chat_id=ADMIN_ID, 
                     document=excel_file, 
-                    caption=f"📊 <b>Автоматический отчет за 3 дня</b>\n📅 Сформирован: {current_time}\n\nВнутри файлы по всем активным и готовым заказам мастерской."
+                    caption=f"📊 <b>Автоматический отчет за 3 дня</b>\n📅 Сформирован: {current_time}\n\nВнутри файлы по всем активным и готовым заказам с формулой потерь металл+9%."
                 )
             except Exception as e:
                 print(f"Ошибка при отправке автоотчета: {e}")
@@ -148,7 +144,7 @@ skip_kb = ReplyKeyboardMarkup(
 async def cmd_start(message: Message):
     await message.answer("Привет! Я бот-помощник для учета ювелирных заказов.", reply_markup=main_kb)
 
-# --- ВЫГРУЗКА В EXCEL ПО КНОПКЕ (ТОЛЬКО СВОИ ЗАКАЗЫ) ---
+# --- ВЫГРУЗКА В EXCEL ПО КНОПКЕ ---
 @dp.message(F.text == "📊 Отчет в Excel")
 async def export_to_excel(message: Message):
     await message.answer("🔄 Формирую ваш личный отчет, подождите немного...")
@@ -161,8 +157,9 @@ async def export_to_excel(message: Message):
         await message.answer("Ваша база данных пока пуста. Нечего выгружать.")
         return
     
-    df['Потери (угар), г'] = df['start_weight'] - df['end_weight']
-    df['Потери (угар), г'] = df['Потери (угар), г'].round(3)
+    # Считаем по новой формуле
+    df['Потери (+9%), г'] = (df['end_weight'] * 1.09) - df['start_weight']
+    df['Потери (+9%), г'] = df['Потери (+9%), г'].round(3)
     
     df_beauty = df.rename(columns={
         'id': 'ID Заказа',
@@ -181,7 +178,7 @@ async def export_to_excel(message: Message):
     df_beauty.to_excel(filename, index=False)
     
     excel_file = FSInputFile(filename)
-    await message.answer_document(document=excel_file, caption="📋 Вот твой свежий отчет по твоим заказам!")
+    await message.answer_document(document=excel_file, caption="📋 Вот твой свежий отчет по твоим заказам (с поправкой +9%)!")
     if os.path.exists(filename):
         os.remove(filename)
 
@@ -201,7 +198,7 @@ async def process_name(message: Message, state: FSMContext):
 async def process_material(message: Message, state: FSMContext):
     await state.update_data(material=message.text)
     await state.set_state(NewOrder.start_weight)
-    await message.answer("Внесите входной вес (в граммах):")
+    await message.answer("Внесите входной вес металла (в граммах):")
 
 @dp.message(NewOrder.start_weight)
 async def process_start_weight(message: Message, state: FSMContext):
@@ -355,12 +352,7 @@ async def process_close_id(message: Message, state: FSMContext):
         if order:
             await state.update_data(order_id=order_id, start_weight=order[2])
             await state.set_state(CloseOrder.end_weight)
-            
-            text = f"Заказ найден (Клиент: {order[0]}).\nВведите финишный вес готового изделия (в граммах):"
-            if order[3]:
-                await message.answer_photo(photo=order[3], caption=text)
-            else:
-                await message.answer(text)
+            await message.answer(f"Заказ найден (Клиент: {order[0]}).\nВведите готовый вес ТОЛЬКО металла (в граммах):")
         else:
             await message.answer("Заказ с таким ID не найден в вашем списке или уже завершен.")
             await state.clear()
@@ -373,7 +365,7 @@ async def process_end_weight(message: Message, state: FSMContext):
         weight = float(message.text.replace(',', '.'))
         await state.update_data(end_weight=weight)
         await state.set_state(CloseOrder.end_stones)
-        await message.answer("Какие камни фактически закрепили?")
+        await message.answer("Какие камни фактически закрепили? (Если нет, напишите 'Нет'):")
     except ValueError:
         await message.answer("Введите вес числом:")
 
@@ -381,7 +373,7 @@ async def process_end_weight(message: Message, state: FSMContext):
 async def process_end_stones(message: Message, state: FSMContext):
     await state.update_data(end_stones=message.text)
     await state.set_state(CloseOrder.price)
-    await message.answer("Введите итоговую стоимость заказа:")
+    await message.answer("Введите итоговую стоимость работы (руб):")
 
 @dp.message(CloseOrder.price)
 async def process_price(message: Message, state: FSMContext):
@@ -389,7 +381,7 @@ async def process_price(message: Message, state: FSMContext):
         price = float(message.text.replace(',', '.').replace(' ', ''))
         await state.update_data(price=price)
         await state.set_state(CloseOrder.end_photo)
-        await message.answer("Отправьте фото готового изделия, либо нажмите кнопку ниже, чтобы пропустить:", reply_markup=skip_kb)
+        await message.answer("Отправьте фото готового изделия или пропустите:", reply_markup=skip_kb)
     except ValueError:
         await message.answer("Введите сумму числом:")
 
@@ -404,7 +396,9 @@ async def process_skip_end_photo(message: Message, state: FSMContext):
 
 async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
-    loss = round(data['start_weight'] - data['end_weight'], 3)
+    
+    # НОВАЯ ФОРМУЛА ПОТЕРЬ: (готовый вес металла + 9%) - изначальный вес
+    loss = round((data['end_weight'] * 1.09) - data['start_weight'], 3)
     
     conn = sqlite3.connect('jewelry_orders.db')
     cursor = conn.cursor()
@@ -418,11 +412,11 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     
     caption = (
         f"🎉 Заказ №{data['order_id']} успешно закрыт!\n\n"
-        f"⚖️ Было: {data['start_weight']} г\n"
-        f"⚖️ Стало: {data['end_weight']} г\n"
-        f"📉 Потери (угар): {loss} г\n"
+        f"⚖️ Входной вес металла: {data['start_weight']} г\n"
+        f"⚖️ Чистый вес готового металла: {data['end_weight']} г\n"
+        f"📉 Потери металла (с учетом +9%): {loss} г\n"
         f"💎 Камни (итог): {data['end_stones']}\n"
-        f"💰 Сумма: {data['price']} руб."
+        f"💰 Стоимость: {data['price']} руб."
     )
     if end_photo_id:
         await message.answer_photo(photo=end_photo_id, caption=caption, reply_markup=main_kb)
@@ -430,7 +424,7 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
         await message.answer(caption, reply_markup=main_kb)
     await state.clear()
 
-# --- ПРОСМОТР АКТИВНЫХ (ТОЛЬКО СВОИ) ---
+# --- ПРОСМОТР АКТИВНЫХ ЗАКАЗОВ ---
 @dp.message(F.text == "📋 Активные заказы")
 async def show_active_orders(message: Message):
     conn = sqlite3.connect('jewelry_orders.db')
@@ -440,7 +434,7 @@ async def show_active_orders(message: Message):
     conn.close()
     
     if not orders:
-        await message.answer("У вас сейчас нет active-заказов в работе.")
+        await message.answer("У вас сейчас нет активных заказов в работе.")
         return
         
     response = "<b>Ваши заказы в работе:</b>\n\n"
@@ -453,11 +447,8 @@ async def show_active_orders(message: Message):
 async def main():
     init_db()
     await start_background_web_server()
-    
-    # Запускаем фоновый таймер для отчетов раз в 3 дня
     asyncio.create_task(auto_report_task())
-    
-    print("Бот успешно запущен!")
+    print("Бот успешно запущен с обновленной формулой угара!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
