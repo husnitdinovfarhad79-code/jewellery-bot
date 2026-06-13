@@ -80,7 +80,7 @@ def check_subscription(user_id):
         if datetime.now() <= pay_till:
             return True, f"Подписка активна до {user[1]}"
             
-    return False, "🔴 Срок действия подписки исчез"
+    return False, "🔴 Срок действия подписки истек"
 
 # --- МИКРО-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request): 
@@ -106,8 +106,8 @@ async def self_ping():
                 async with session.get(YOUR_RENDER_URL) as response:
                     if response.status == 200:
                         print("⏰ Само-пинг: Сервер активен!")
-        except Exception as e:
-            print(f"Ошибка само-пинга: {e}")
+        except:
+            pass
         await asyncio.sleep(10 * 60)
 
 # --- АВТОМАТИЧЕСКИЕ БЭКАПЫ ---
@@ -139,46 +139,49 @@ async def run_full_backup():
                         except: 
                             pass
                         if os.path.exists(filename): os.remove(filename)
-    except Exception as e: 
-        print(f"Ошибка планировщика бэкапов: {e}")
+    except: 
+        pass
 
 # --- КРАСИВЫЙ ЭКСПОРТ В EXCEL ---
 def generate_excel_file(user_id, filename):
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM orders WHERE telegram_id = ?", conn, params=(user_id,))
-    conn.close()
-    if df.empty: return False
-    
-    df['end_weight'] = df['end_weight'].fillna(0.0)
-    df['price'] = df['price'].fillna(0.0)
-    df['advance'] = df['advance'].fillna(0.0)
-    df['gold_rate'] = df['gold_rate'].fillna(0.0)
-    
-    df['Фактические потери, г'] = (df['start_weight'] - df['end_weight']).round(3)
-    df['Разница с учетом 9%, г'] = (df['start_weight'] - (df['end_weight'] * 1.09)).round(3)
-    
-    df['Стоимость разницы металла (руб)'] = (df['Разница с учетом 9%, г'] * df['gold_rate']).round(2)
-    df['Остаток за работу (руб)'] = (df['price'] - df['advance']).round(2)
-    df['Общий итог к оплате клиентом (руб)'] = (df['Остаток за работу (руб)'] - df['Стоимость разницы металла (руб)']).round(2)
-    
-    df = df.rename(columns={
-        'id': 'ID Заказа', 'client_name': 'Клиент', 'item_type': 'Тип изделия', 'probing': 'Проба',
-        'material': 'Материал', 'size_length': 'Размер/Длина', 'start_weight': 'Входной вес (г)', 
-        'gold_rate': 'Курс золота (руб/г)', 'advance': 'Внесенный Аванс (руб)', 'end_weight': 'Чистый вес (г)', 
-        'end_stones_weight': 'Вес камней (г)', 'end_stones': 'Описание камней', 'price': 'Стоимость работы (руб)', 'status': 'Статус заказа'
-    })
-    
-    df = df.drop(columns=['telegram_id','start_photo_id','end_photo_id','start_stones'], errors='ignore')
-    
-    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Заказы')
-        worksheet = writer.sheets['Заказы']
-        for col in worksheet.columns:
-            max_len = max(len(str(cell.value or '')) for cell in col)
-            col_letter = col[0].column_letter
-            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
-            
-    return True
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        df = pd.read_sql_query("SELECT * FROM orders WHERE telegram_id = ?", conn, params=(user_id,))
+        conn.close()
+        if df.empty: return False
+        
+        df['end_weight'] = df['end_weight'].fillna(0.0)
+        df['price'] = df['price'].fillna(0.0)
+        df['advance'] = df['advance'].fillna(0.0)
+        df['gold_rate'] = df['gold_rate'].fillna(0.0)
+        
+        df['Фактические потери, г'] = (df['start_weight'] - df['end_weight']).round(3)
+        df['Разница с учетом 9%, г'] = (df['start_weight'] - (df['end_weight'] * 1.09)).round(3)
+        
+        df['Стоимость разницы металла (руб)'] = (df['Разница с учетом 9%, г'] * df['gold_rate']).round(2)
+        df['Остаток за работу (руб)'] = (df['price'] - df['advance']).round(2)
+        df['Общий итог к оплате клиентом (руб)'] = (df['Остаток за работу (руб)'] - df['Стоимость разницы металла (руб)']).round(2)
+        
+        df = df.rename(columns={
+            'id': 'ID Заказа', 'client_name': 'Клиент', 'item_type': 'Тип изделия', 'probing': 'Проба',
+            'material': 'Материал', 'size_length': 'Размер/Длина', 'start_weight': 'Входной вес (г)', 
+            'gold_rate': 'Курс золота (руб/г)', 'advance': 'Внесенный Аванс (руб)', 'end_weight': 'Чистый вес (г)', 
+            'end_stones_weight': 'Вес камней (г)', 'end_stones': 'Описание камней', 'price': 'Стоимость работы (руб)', 'status': 'Статус заказа'
+        })
+        
+        df = df.drop(columns=['telegram_id','start_photo_id','end_photo_id','start_stones'], errors='ignore')
+        
+        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Заказы')
+            worksheet = writer.sheets['Заказы']
+            for col in worksheet.columns:
+                max_len = max(len(str(cell.value or '')) for cell in col)
+                col_letter = col[0].column_letter
+                worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
+                
+        return True
+    except:
+        return False
 
 # --- СОСТОЯНИЯ (FSM) ---
 class NewOrder(StatesGroup):
@@ -298,7 +301,8 @@ async def cmd_restore_database(message: Message, state: FSMContext):
     await state.set_state(AdminRestoreState.waiting_db_file)
     await message.answer("📥 Отправьте файл бэкапа базы данных `.db`:")
 
-@dp.document(AdminRestoreState.waiting_db_file)
+# ИСПРАВЛЕНО: Вместо несуществующего @dp.document используем корректный фильтр aiogram 3.x
+@dp.message(AdminRestoreState.waiting_db_file, F.document)
 async def process_restore_db(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     document = message.document
@@ -658,7 +662,6 @@ async def process_price(message: Message, state: FSMContext):
         q_msg = await message.answer("Укажите цену цифрами:")
         await track_message(state, q_msg.message_id)
 
-# Железобетонная проверка медиафайлов/текста кнопок без багов библиотеки
 @dp.message(CloseOrder.end_photo)
 async def process_end_photo(message: Message, state: FSMContext): 
     await track_message(state, message.message_id)
