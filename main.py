@@ -80,7 +80,7 @@ def check_subscription(user_id):
         if datetime.now() <= pay_till:
             return True, f"Подписка активна до {user[1]}"
             
-    return False, "🔴 Срок действия подписки истек"
+    return False, "🔴 Срок действия подписки исчез"
 
 # --- МИКРО-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request): 
@@ -149,7 +149,6 @@ def generate_excel_file(user_id, filename):
     conn.close()
     if df.empty: return False
     
-    # Расширенные расчеты с защитой от пустых значений завершения
     df['end_weight'] = df['end_weight'].fillna(0.0)
     df['price'] = df['price'].fillna(0.0)
     df['advance'] = df['advance'].fillna(0.0)
@@ -158,16 +157,10 @@ def generate_excel_file(user_id, filename):
     df['Фактические потери, г'] = (df['start_weight'] - df['end_weight']).round(3)
     df['Разница с учетом 9%, г'] = (df['start_weight'] - (df['end_weight'] * 1.09)).round(3)
     
-    # Стоимость потерь/остатка металла в рублях (Разница * Курс)
     df['Стоимость разницы металла (руб)'] = (df['Разница с учетом 9%, г'] * df['gold_rate']).round(2)
-    
-    # Остаток чисто за саму работу (Цена работы - Аванс)
     df['Остаток за работу (руб)'] = (df['price'] - df['advance']).round(2)
-    
-    # Общий финансовый итог для клиента
     df['Общий итог к оплате клиентом (руб)'] = (df['Остаток за работу (руб)'] - df['Стоимость разницы металла (руб)']).round(2)
     
-    # Переименование колонок для красоты
     df = df.rename(columns={
         'id': 'ID Заказа', 'client_name': 'Клиент', 'item_type': 'Тип изделия', 'probing': 'Проба',
         'material': 'Материал', 'size_length': 'Размер/Длина', 'start_weight': 'Входной вес (г)', 
@@ -175,10 +168,8 @@ def generate_excel_file(user_id, filename):
         'end_stones_weight': 'Вес камней (г)', 'end_stones': 'Описание камней', 'price': 'Стоимость работы (руб)', 'status': 'Статус заказа'
     })
     
-    # Удаляем служебные колонки
     df = df.drop(columns=['telegram_id','start_photo_id','end_photo_id','start_stones'], errors='ignore')
     
-    # Запись в Excel с авто-подбором ширины колонок
     with pd.ExcelWriter(filename, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Заказы')
         worksheet = writer.sheets['Заказы']
@@ -542,15 +533,16 @@ async def process_advance_step(message: Message, state: FSMContext):
         q_msg = await message.answer("Введите сумму аванса числом (например, 3000):")
         await track_message(state, q_msg.message_id)
 
-@dp.message(NewOrder.photo, F.photo)
+@dp.message(NewOrder.photo)
 async def process_photo_step(message: Message, state: FSMContext): 
     await track_message(state, message.message_id)
-    await save_order_to_db(message.photo[-1].file_id, message, state)
-
-@dp.message(NewOrder.photo, F.text.in_(["⏩ Пропустить фото", "⏩ Пропустить photo"]))
-async def process_skip_photo_step(message: Message, state: FSMContext): 
-    await track_message(state, message.message_id)
-    await save_order_to_db(None, message, state)
+    if message.photo:
+        await save_order_to_db(message.photo[-1].file_id, message, state)
+    elif message.text in ["⏩ Пропустить фото", "⏩ Пропустить photo"]:
+        await save_order_to_db(None, message, state)
+    else:
+        q_msg = await message.answer("Пожалуйста, отправьте фото или нажмите кнопку пропуска:")
+        await track_message(state, q_msg.message_id)
 
 async def save_order_to_db(photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
@@ -666,16 +658,17 @@ async def process_price(message: Message, state: FSMContext):
         q_msg = await message.answer("Укажите цену цифрами:")
         await track_message(state, q_msg.message_id)
 
-@dp.message(CloseOrder.end_photo, F.photo)
+# Железобетонная проверка медиафайлов/текста кнопок без багов библиотеки
+@dp.message(CloseOrder.end_photo)
 async def process_end_photo(message: Message, state: FSMContext): 
     await track_message(state, message.message_id)
-    await finalize_order(message.photo[-1].file_id, message, state)
-
-# Исправлен баг валидации кнопки пропуска фото при завершении заказа
-@dp.message(CloseOrder.end_photo, F.text.is_("⏩ Пропустить фото"))
-async def process_skip_end_photo(message: Message, state: FSMContext): 
-    await track_message(state, message.message_id)
-    await finalize_order(None, message, state)
+    if message.photo:
+        await finalize_order(message.photo[-1].file_id, message, state)
+    elif message.text in ["⏩ Пропустить фото", "⏩ Пропустить photo"]:
+        await finalize_order(None, message, state)
+    else:
+        q_msg = await message.answer("Пожалуйста, отправьте фото готового изделия или нажмите кнопку пропуска:")
+        await track_message(state, q_msg.message_id)
 
 async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
