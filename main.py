@@ -71,8 +71,8 @@ def check_subscription(user_id):
     reg_date = datetime.strptime(user[0], "%Y-%m-%d")
     days_passed = (datetime.now() - reg_date).days
     
-    if days_passed <= 3:
-        days_left = 3 - days_passed
+    if days_passed <= 1:
+        days_left = 1 - days_passed
         return True, f"Пробный период (осталось {days_left} дн.)"
         
     if user[1]:
@@ -80,7 +80,7 @@ def check_subscription(user_id):
         if datetime.now() <= pay_till:
             return True, f"Подписка активна до {user[1]}"
             
-    return False, "🔴 Срок действия подписки истек"
+    return False, "🔴 Срок действия подписки исчез"
 
 # --- МИКРО-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request): 
@@ -142,7 +142,7 @@ async def run_full_backup():
     except: 
         pass
 
-# --- КРАСИВЫЙ ЭКСПОРТ В EXCEL ---
+# --- ЭКСПОРТ В EXCEL ---
 def generate_excel_file(user_id, filename):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -155,7 +155,8 @@ def generate_excel_file(user_id, filename):
         df['advance'] = df['advance'].fillna(0.0)
         df['gold_rate'] = df['gold_rate'].fillna(0.0)
         
-        df['Фактические потери (угар), г'] = (df['start_weight'] - df['end_weight']).round(3)
+        # Формула угара для Excel: Чистый вес * 1.09 - Входной вес
+        df['Фактические потери (угар), г'] = ((df['end_weight'] * 1.09) - df['start_weight']).round(3)
         df['Стоимость угара (руб)'] = (df['Фактические потери (угар), г'] * df['gold_rate']).round(2)
         df['Остаток за работу (руб)'] = (df['price'] - df['advance']).round(2)
         
@@ -676,8 +677,8 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     end_w = data['end_weight']
     gold_rate = data['gold_rate']
     
-    # ПРЯМОЙ РАСЧЕТ УГАРА
-    actual_loss = round(start_w - end_w, 3)
+    # ТВОЯ ФОРМУЛА: Чистый вес + 9% - Входной вес
+    actual_loss = round((end_w * 1.09) - start_w, 3)
     loss_price = round(actual_loss * gold_rate, 2)
     
     to_pay = round(data['price'] - data['advance'], 2)
