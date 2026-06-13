@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
 
 # --- НАСТРОЙКА БОТА ---
-TOKEN = "8731687908:AAEA3cLNjsivjPGph4iIZl4MGajT0ybMIUQ" 
+TOKEN = "8731687908:AAF1K5UJjSUbY5Nwgv1ye4gTay36i130GMs" 
 ADMIN_ID = 481597187  # Твой точный Telegram ID для получения отчетов раз в 3 дня
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
