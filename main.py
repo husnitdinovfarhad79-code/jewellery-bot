@@ -151,13 +151,62 @@ def get_main_menu_kb():
     ])
 
 back_to_menu_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")]])
-skip_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⏩ Пропустить")]], resize_keyboard=True, one_time_keyboard=True)
 skip_photo_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⏩ Пропустить фото")]], resize_keyboard=True, one_time_keyboard=True)
 zero_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="0")]], resize_keyboard=True, one_time_keyboard=True)
-no_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Нет")]], resize_keyboard=True, one_time_keyboard=True)
-probing_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="585"), KeyboardButton(text="750")],[KeyboardButton(text="925 Серебро"), KeyboardButton(text="⏩ Пропустить")]], resize_keyboard=True, one_time_keyboard=True)
 
-# Вспомогательная функция для сбора и удаления истории сообщений опроса
+# БЫСТРЫЕ ОТВЕТЫ ДЛЯ ВСЕХ ШАГОВ
+item_type_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="Chain Bismarck"), KeyboardButton(text="Anchor Chain")],
+    [KeyboardButton(text="Ring"), KeyboardButton(text="Wedding Ring")],
+    [KeyboardButton(text="Earrings"), KeyboardButton(text="Cross"), KeyboardButton(text="Pendant")],
+    [KeyboardButton(text="✏️ Другое (Ввести вручную)")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+probing_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="585"), KeyboardButton(text="750")],
+    [KeyboardButton(text="925 Серебро"), KeyboardButton(text="⏩ Пропустить")],
+    [KeyboardButton(text="✏️ Другая проба")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+material_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="Красное золото"), KeyboardButton(text="Лимонное золото")],
+    [KeyboardButton(text="Белое золото"), KeyboardButton(text="Серебро 925")],
+    [KeyboardButton(text="✏️ Другое (Ввести вручную)")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+size_length_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="16.5"), KeyboardButton(text="17.0"), KeyboardButton(text="17.5"), KeyboardButton(text="18.0")],
+    [KeyboardButton(text="45 см"), KeyboardButton(text="50 см"), KeyboardButton(text="55 см"), KeyboardButton(text="60 см")],
+    [KeyboardButton(text="⏩ Пропустить"), KeyboardButton(text="✏️ Другой размер")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+start_stones_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="Без камней"), KeyboardButton(text="Фианиты")],
+    [KeyboardButton(text="Бриллианты"), KeyboardButton(text="Изумруд")],
+    [KeyboardButton(text="Рубин"), KeyboardButton(text="Сапфир")],
+    [KeyboardButton(text="✏️ Свой вариант")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+gold_rate_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="5000"), KeyboardButton(text="6000")],
+    [KeyboardButton(text="7000"), KeyboardButton(text="8000")],
+    [KeyboardButton(text="⏩ Пропустить"), KeyboardButton(text="✏️ Свой курс")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+advance_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="0 (Без аванса)"), KeyboardButton(text="3000")],
+    [KeyboardButton(text="5000"), KeyboardButton(text="10000")],
+    [KeyboardButton(text="✏️ Другая сумма")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+end_stones_kb = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="Без изменений"), KeyboardButton(text="Фианиты")],
+    [KeyboardButton(text="Бриллианты"), KeyboardButton(text="0")],
+    [KeyboardButton(text="✏️ Написать другое")]
+], resize_keyboard=True, one_time_keyboard=True)
+
+
+# Очистка истории сообщений
 async def clear_survey_history(state: FSMContext, current_chat_id: int):
     state_data = await state.get_data()
     msg_ids = state_data.get("messages_to_delete", [])
@@ -172,7 +221,7 @@ async def track_message(state: FSMContext, message_id: int):
     msg_ids.append(message_id)
     await state.update_data(messages_to_delete=msg_ids)
 
-# --- ПРОВЕРКА ДОСТУПА И БЛОКИРОВКА ---
+# --- ПРОВЕРКА ДОСТУПА ---
 async def has_access_or_alert(event, user_id: int) -> bool:
     has_access, status_msg = check_subscription(user_id)
     if has_access: return True
@@ -192,7 +241,7 @@ async def has_access_or_alert(event, user_id: int) -> bool:
     else: await event.message.edit_text(text, reply_markup=pay_btn, parse_mode="HTML")
     return False
 
-# --- ХЕНДЛЕРЫ МЕНЮ И СТАРТА ---
+# --- ХЕНДЛЕРЫ КОМАНД ---
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -228,7 +277,7 @@ async def sub_info_callback(callback: CallbackQuery):
     await callback.message.edit_text(f"📊 <b>Информация о лицензии:</b>\n\nТекущий статус: <b>{status}</b>", reply_markup=back_to_menu_kb, parse_mode="HTML")
     await callback.answer()
 
-# --- ОПЛАТА ПОДПИСКИ ---
+# --- СЦЕНАРИИ ОПЛАТЫ ---
 @dp.callback_query(F.data == "show_payment_info")
 async def payment_info(callback: CallbackQuery):
     text = (
@@ -303,12 +352,17 @@ async def process_client_name(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
     await state.update_data(client_name=message.text)
     await state.set_state(NewOrder.item_type)
-    q_msg = await message.answer("💍 Что изготавливаем? (Тип изделия):")
+    q_msg = await message.answer("💍 Что изготавливаем? Выберите вариант или нажмите ввод вручную:", reply_markup=item_type_kb)
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.item_type)
 async def process_item_type(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
+    if message.text == "✏️ Другое (Ввести вручную)":
+        q_msg = await message.answer("✍️ Напишите тип изделия вручную:")
+        await track_message(state, q_msg.message_id)
+        return
+        
     await state.update_data(item_type=message.text)
     await state.set_state(NewOrder.probing)
     q_msg = await message.answer("🏷️ Какая проба планируется у изделия?:", reply_markup=probing_kb)
@@ -317,23 +371,36 @@ async def process_item_type(message: Message, state: FSMContext):
 @dp.message(NewOrder.probing)
 async def process_probing(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
+    if message.text == "✏️ Другая проба":
+        q_msg = await message.answer("✍️ Введите пробу вручную:")
+        await track_message(state, q_msg.message_id)
+        return
     val = "" if message.text == "⏩ Пропустить" else message.text
     await state.update_data(probing=val)
     await state.set_state(NewOrder.material)
-    q_msg = await message.answer("🎨 Укажите материал и цвет металла:")
+    q_msg = await message.answer("🎨 Укажите материал и цвет металла (выберите или нажмите ручной ввод):", reply_markup=material_kb)
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.material)
 async def process_material_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
+    if message.text == "✏️ Другое (Ввести вручную)":
+        q_msg = await message.answer("✍️ Укажите ваш цвет металла/материал вручную:")
+        await track_message(state, q_msg.message_id)
+        return
+        
     await state.update_data(material=message.text)
     await state.set_state(NewOrder.size_length)
-    q_msg = await message.answer("📏 Укажите размер или длину изделия:", reply_markup=skip_kb)
+    q_msg = await message.answer("📏 Укажите размер или длину изделия (выберите или введите вручную):", reply_markup=size_length_kb)
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.size_length)
 async def process_size_length(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
+    if message.text == "✏️ Другой размер":
+        q_msg = await message.answer("✍️ Напишите точный размер или длину вручную:")
+        await track_message(state, q_msg.message_id)
+        return
     val = "" if message.text == "⏩ Пропустить" else message.text
     await state.update_data(size_length=val)
     await state.set_state(NewOrder.start_weight)
@@ -347,7 +414,7 @@ async def process_start_weight_step(message: Message, state: FSMContext):
         weight = float(message.text.replace(',', '.'))
         await state.update_data(start_weight=weight)
         await state.set_state(NewOrder.start_stones)
-        q_msg = await message.answer("💎 Какие камни планируются изначально?:", reply_markup=no_kb)
+        q_msg = await message.answer("💎 Какие камни планируются изначально? (Выберите быстрый ответ или ручной ввод):", reply_markup=start_stones_kb)
         await track_message(state, q_msg.message_id)
     except ValueError: 
         q_msg = await message.answer("Введите вес цифрами:")
@@ -356,25 +423,42 @@ async def process_start_weight_step(message: Message, state: FSMContext):
 @dp.message(NewOrder.start_stones)
 async def process_start_stones_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
+    if message.text == "✏️ Свой вариант":
+        q_msg = await message.answer("✍️ Опишите планируемые камни вручную:")
+        await track_message(state, q_msg.message_id)
+        return
     await state.update_data(start_stones=message.text)
     await state.set_state(NewOrder.gold_rate)
-    q_msg = await message.answer("📈 Укажите расчетный курс золота за грамм:", reply_markup=skip_kb)
+    q_msg = await message.answer("📈 Укажите расчетный курс золота за грамм (выберите или введите число):", reply_markup=gold_rate_kb)
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.gold_rate)
 async def process_gold_rate_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
-    rate = 0.0 if message.text == "⏩ Пропустить" else float(message.text.replace(',', '.').replace(' ', ''))
-    await state.update_data(gold_rate=rate)
-    await state.set_state(NewOrder.advance)
-    q_msg = await message.answer("💰 Какую сумму аванса внес клиент?:", reply_markup=zero_kb)
-    await track_message(state, q_msg.message_id)
+    if message.text == "✏️ Свой курс":
+        q_msg = await message.answer("✍️ Введите курс металла цифрами вручную:")
+        await track_message(state, q_msg.message_id)
+        return
+    try:
+        rate = 0.0 if message.text == "⏩ Пропустить" else float(message.text.replace(',', '.').replace(' ', ''))
+        await state.update_data(gold_rate=rate)
+        await state.set_state(NewOrder.advance)
+        q_msg = await message.answer("💰 Какую сумму аванса внес клиент? (Выберите из вариантов или укажите свою цифру):", reply_markup=advance_kb)
+        await track_message(state, q_msg.message_id)
+    except ValueError:
+        q_msg = await message.answer("Введите курс корректным числом:")
+        await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.advance)
 async def process_advance_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
+    if message.text == "✏️ Другая сумма":
+        q_msg = await message.answer("✍️ Введите точную сумму аванса числом вручную:")
+        await track_message(state, q_msg.message_id)
+        return
     try:
-        advance = float(message.text.replace(',', '.').replace(' ', ''))
+        clean_text = message.text.replace("0 (Без аванса)", "0").replace(',', '.').replace(' ', '')
+        advance = float(clean_text)
         await state.update_data(advance=advance)
         await state.set_state(NewOrder.photo)
         q_msg = await message.answer("📸 Прикрепите фотографию/эскиз или пропустите:", reply_markup=skip_photo_kb)
@@ -410,10 +494,8 @@ async def save_order_to_db(photo_id, message: Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    # Принудительная очистка истории вопросов перед отправкой чека
     await clear_survey_history(state, message.chat.id)
     
-    # СТРОГО ТВОЙ ДИЗАЙН С ДОБАВЛЕНИЕМ СТРОК ТИПА, РАЗМЕРА И АВАНСА
     caption = (
         f"✅ Заказ успешно создан!\n"
         f"🆔 ID заказа: {order_id}\n"
@@ -423,6 +505,7 @@ async def save_order_to_db(photo_id, message: Message, state: FSMContext):
         f"📏 Размер/Длина: {data['size_length']}\n"
         f"⚖️ Входной вес: {data['start_weight']} г\n"
         f"💎 Камни: {data['start_stones']}\n"
+        f"📈 Курс металла: {data['gold_rate']} руб.\n"
         f"💰 Аванс: {data['advance']} руб."
     )
     await (message.answer_photo(photo=photo_id, caption=caption) if photo_id else message.answer(caption))
@@ -479,7 +562,7 @@ async def process_end_stones_weight(message: Message, state: FSMContext):
     try:
         await state.update_data(end_stones_weight=float(message.text.replace(',', '.')))
         await state.set_state(CloseOrder.end_stones)
-        q_msg = await message.answer("Введите описание закрепленных камней:")
+        q_msg = await message.answer("Введите описание закрепленных камней (выберите или напишите вручную):", reply_markup=end_stones_kb)
         await track_message(state, q_msg.message_id)
     except ValueError: 
         q_msg = await message.answer("Введите вес камней числом:")
@@ -488,6 +571,10 @@ async def process_end_stones_weight(message: Message, state: FSMContext):
 @dp.message(CloseOrder.end_stones)
 async def process_end_stones(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
+    if message.text == "✏️ Написать другое":
+        q_msg = await message.answer("✍️ Опишите закрепленные камни вручную:")
+        await track_message(state, q_msg.message_id)
+        return
     await state.update_data(end_stones=message.text)
     await state.set_state(CloseOrder.price)
     q_msg = await message.answer("Укажите итоговую стоимость работы (руб):")
@@ -518,18 +605,18 @@ async def process_skip_end_photo(message: Message, state: FSMContext):
 async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
     
-    # РАСЧЕТ ПОТЕРЬ
+    # РАСЧЕТЫ ВЕСА
     loss = round((data['end_weight'] * 1.09) - data['start_weight'], 3)
     total_metal = round(abs(loss) + data['end_weight'], 3)
     
-    # ФИНАЛЬНАЯ СУММА С УЧЕТОМ КУРСА ЕСЛИ ПОТЕРЯ В ПЛЮС
-    final_price = data['price']
+    # Формируем строку потерь со скобками в рублях, если ушли в плюс
+    loss_str = f"{loss} г"
     if loss > 0:
-        plus_money = loss * data['gold_rate']
-        final_price += plus_money
-    
-    # Округлим итоговую цену
-    final_price = round(final_price, 2)
+        rub_value = round(loss * data['gold_rate'], 2)
+        loss_str += f" (+{rub_value} руб.)"
+        
+    # ИТОГОВАЯ СУММА К ОПЛАТЕ: Стоимость работы МИНУС аванс
+    final_price = round(data['price'] - data['advance'], 2)
     
     conn = sqlite3.connect('jewelry_orders.db')
     cursor = conn.cursor()
@@ -537,16 +624,14 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    # Удаляем историю опроса закрытия
     await clear_survey_history(state, message.chat.id)
     
-    # СТРОГО ТВOЙ СТИЛЬ ОФОРМЛЕНИЯ
     caption = (
         f"🎉 Заказ №{data['order_id']} успешно закрыт!\n\n"
         f"⚖️ Входной вес металла: {data['start_weight']} г\n"
         f"⚖️ Чистый вес готового металла: {data['end_weight']} г\n"
         f"💎 Вес закрепленных камней: {data['end_stones_weight']} г ({data['end_stones']})\n"
-        f"📉 Потери (металл +9%): {loss} г\n"
+        f"📉 Потери (металл +9%): {loss_str}\n"
         f"📊 Итог (Потери + Чистый вес): {total_metal} г\n"
         f"💰 Сумма: {final_price} руб."
     )
