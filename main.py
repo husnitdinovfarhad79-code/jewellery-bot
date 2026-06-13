@@ -71,8 +71,8 @@ def check_subscription(user_id):
     reg_date = datetime.strptime(user[0], "%Y-%m-%d")
     days_passed = (datetime.now() - reg_date).days
     
-    if days_passed <= 1:
-        days_left = 1 - days_passed
+    if days_passed <= 3:
+        days_left = 3 - days_passed
         return True, f"Пробный период (осталось {days_left} дн.)"
         
     if user[1]:
@@ -700,6 +700,7 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
         f"🎉 <b>Заказ №{data['order_id']} успешно закрыт!</b>\n\n"
         f"⚖️ Входной вес металла: {start_w} г\n"
         f"⚖️ Чистый вес готового изделия без камней: {end_w} г\n"
+        f"💎 Камни (вид, вес, характеристики): {data['end_stones']}\n"
         f"📉 Фактические потери (угар): {actual_loss} г\n"
         f"💰 Стоимость угара металла: {loss_price} руб.\n\n"
         f"💸 <b>Остаток к оплате за работу: {to_pay} руб.</b> (Аванс: {data['advance']} руб.)"
