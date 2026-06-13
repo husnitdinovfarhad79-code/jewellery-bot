@@ -2,9 +2,10 @@ import asyncio
 import sqlite3
 import os
 import pandas as pd
+import aiohttp
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
@@ -15,10 +16,11 @@ ADMIN_ID = 6360392051  # Твой Telegram ID
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+DB_NAME = 'jewelry_orders.db'
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (
@@ -57,7 +59,7 @@ def check_subscription(user_id):
     if user_id == ADMIN_ID:
         return True, "⭐ Администратор"
     
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT reg_date, pay_till FROM users WHERE telegram_id = ?", (user_id,))
     user = cursor.fetchone()
@@ -82,7 +84,7 @@ def check_subscription(user_id):
 
 # --- МИКРО-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request): 
-    return web.Response(text="Ювелирный бот активен!")
+    return web.Response(text="Ювелирный бот активен и защищен!")
 
 async def start_background_web_server():
     app = web.Application()
@@ -94,42 +96,93 @@ async def start_background_web_server():
     await site.start()
     print(f" Web-сервер успешно запущен на порту {port}")
 
-# --- АВТОБЭКАПЫ ---
+# --- ВНУТРЕННИЙ САМО-ПИНГ ---
+async def self_ping():
+    YOUR_RENDER_URL = "https://jewellery-bot-q7hy.onrender.com/" 
+    await asyncio.sleep(30)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(YOUR_RENDER_URL) as response:
+                    if response.status == 200:
+                        print("⏰ Само-пинг: Сервер активен!")
+        except Exception as e:
+            print(f"Ошибка само-пинга: {e}")
+        await asyncio.sleep(10 * 60)
+
+# --- АВТОМАТИЧЕСКИЕ БЭКАПЫ ---
 async def backup_scheduler():
     while True:
-        await asyncio.sleep(12 * 3600)
-        try:
-            conn = sqlite3.connect('jewelry_orders.db')
+        await asyncio.sleep(6 * 3600)
+        await run_full_backup()
+
+async def run_full_backup():
+    try:
+        if os.path.exists(DB_NAME):
+            db_file = FSInputFile(DB_NAME, filename=f"БЭКАП_БАЗЫ_{datetime.now().strftime('%Y%m%d_%H%M')}.db")
+            await bot.send_document(chat_id=ADMIN_ID, document=db_file, caption=f"📦 <b>СИНХРОНИЗАЦИЯ:</b> База данных успешно сохранена.")
+            
+            conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT telegram_id FROM orders")
             users = cursor.fetchall()
             conn.close()
+            
             for user in users:
                 user_id = user[0]
                 if check_subscription(user_id)[0]:
-                    df_beauty = get_excel_report(user_id=user_id)
-                    if df_beauty is not None:
-                        filename = f"Резервная_Копия_{user_id}.xlsx"
-                        df_beauty.to_excel(filename, index=False)
-                        try: await bot.send_document(chat_id=user_id, document=FSInputFile(filename), caption="📦 Автоматический бэкап.")
-                        except: pass
+                    filename = f"Резервная_Копия_{user_id}.xlsx"
+                    export_success = generate_excel_file(user_id, filename)
+                    if export_success:
+                        try: 
+                            await bot.send_document(chat_id=user_id, document=FSInputFile(filename), caption="📦 Ваш автоматический бэкап в Excel.")
+                        except: 
+                            pass
                         if os.path.exists(filename): os.remove(filename)
-        except Exception as e: print(f"Ошибка бэкапа: {e}")
+    except Exception as e: 
+        print(f"Ошибка планировщика бэкапов: {e}")
 
-def get_excel_report(user_id=None):
-    conn = sqlite3.connect('jewelry_orders.db')
+# --- КРАСИВЫЙ ЭКСПОРТ В EXCEL (С РАСШИРЕННЫМИ КОЛОНКАМИ И КУРСОМ) ---
+def generate_excel_file(user_id, filename):
+    conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM orders WHERE telegram_id = ?", conn, params=(user_id,))
     conn.close()
-    if df.empty: return None
-    df['Потери металла, г'] = ((df['end_weight'] * 1.09) - df['start_weight']).round(3)
-    df['Потери + Чистый вес, г'] = (df['Потери металла, г'].abs() + df['end_weight']).round(3)
-    df['Остаток к оплате (руб)'] = (df['price'] - df['advance']).round(2)
-    return df.rename(columns={
+    if df.empty: return False
+    
+    # Расширенные расчеты с учетом курса золота
+    df['Фактические потери, г'] = (df['start_weight'] - df['end_weight']).round(3)
+    df['Разница с учетом 9%, г'] = (df['start_weight'] - (df['end_weight'] * 1.09)).round(3)
+    
+    # Стоимость потерь/остатка металла в рублях (Разница * Курс)
+    df['Стоимость разницы металла (руб)'] = (df['Разница с учетом 9%, г'] * df['gold_rate']).round(2)
+    
+    # Остаток чисто за саму работу (Цена работы - Аванс)
+    df['Остаток за работу (руб)'] = (df['price'] - df['advance']).round(2)
+    
+    # Общий финансовый итог для клиента (Работа - Аванс - Стоимость возвращенного металла)
+    df['Общий итог к оплате клиентом (руб)'] = (df['Остаток за работу (руб)'] - df['Стоимость разницы металла (руб)']).round(2)
+    
+    # Переименование колонок для красоты
+    df = df.rename(columns={
         'id': 'ID Заказа', 'client_name': 'Клиент', 'item_type': 'Тип изделия', 'probing': 'Проба',
         'material': 'Материал', 'size_length': 'Размер/Длина', 'start_weight': 'Входной вес (г)', 
-        'gold_rate': 'Курс золото', 'advance': 'Аванс', 'end_weight': 'Чистый вес (г)', 
-        'end_stones_weight': 'Камни (ct)', 'end_stones': 'Камни завершения', 'price': 'Сумма', 'status': 'Статус'
-    }).drop(columns=['telegram_id','start_photo_id','end_photo_id'], errors='ignore')
+        'gold_rate': 'Курс золота (руб/г)', 'advance': 'Внесенный Аванс (руб)', 'end_weight': 'Чистый вес (г)', 
+        'end_stones_weight': 'Вес камней (г)', 'end_stones': 'Описание камней', 'price': 'Стоимость работы (руб)', 'status': 'Статус заказа'
+    })
+    
+    # Удаляем служебные колонки фоток
+    df = df.drop(columns=['telegram_id','start_photo_id','end_photo_id','start_stones'], errors='ignore')
+    
+    # Запись в Excel с авто-подбором ширины колонок (чтобы не было сжато)
+    with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Заказы')
+        worksheet = writer.sheets['Заказы']
+        for col in worksheet.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = col[0].column_letter
+            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12) # Добавляем отступы
+            
+    return True
 
 # --- СОСТОЯНИЯ (FSM) ---
 class NewOrder(StatesGroup):
@@ -144,22 +197,25 @@ class EditOrder(StatesGroup):
 class PaymentState(StatesGroup):
     sender_name = State()
 
+class AdminRestoreState(StatesGroup):
+    waiting_db_file = State()
+
 # --- КЛАВИАТУРЫ ---
 def get_main_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Новый заказ", callback_data="menu_new_order"), 
          InlineKeyboardButton(text="🏁 Завершить заказ", callback_data="menu_close_order")],
-        [InlineKeyboardButton(text="📋 Активные заказы", callback_data="menu_active_orders"),
-         InlineKeyboardButton(text="✏️ Редактировать", callback_data="menu_edit_order")],
-        [InlineKeyboardButton(text="📊 Отчет в Excel", callback_data="menu_excel"),
-         InlineKeyboardButton(text="💳 Моя подписка", callback_data="menu_sub_info")]
+        [InlineKeyboardButton(text="📋 В работе", callback_data="menu_active_orders"),
+         InlineKeyboardButton(text="📦 Архив заказов", callback_data="menu_archive_orders")],
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data="menu_edit_order"),
+         InlineKeyboardButton(text="📊 Отчет в Excel", callback_data="menu_excel")],
+        [InlineKeyboardButton(text="💳 Моя подписка", callback_data="menu_sub_info")]
     ])
 
 back_to_menu_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В главное меню", callback_data="back_to_main")]])
 skip_photo_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⏩ Пропустить фото")]], resize_keyboard=True, one_time_keyboard=True)
 zero_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="0")]], resize_keyboard=True, one_time_keyboard=True)
 
-# ИСПРАВЛЕННЫЕ РУССКИЕ КНОПКИ БЫСТРЫХ ОТВЕТОВ
 item_type_kb = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="Цепь Бисмарк"), KeyboardButton(text="Цепь Якорная")],
     [KeyboardButton(text="Кольцо"), KeyboardButton(text="Обручальное кольцо")],
@@ -192,26 +248,12 @@ start_stones_kb = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="✏️ Свой вариант")]
 ], resize_keyboard=True, one_time_keyboard=True)
 
-gold_rate_kb = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="5000"), KeyboardButton(text="6000")],
-    [KeyboardButton(text="7000"), KeyboardButton(text="8000")],
-    [KeyboardButton(text="⏩ Пропустить"), KeyboardButton(text="✏️ Свой курс")]
-], resize_keyboard=True, one_time_keyboard=True)
-
-advance_kb = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="0 (Без аванса)"), KeyboardButton(text="3000")],
-    [KeyboardButton(text="5000"), KeyboardButton(text="10000")],
-    [KeyboardButton(text="✏️ Другая сумма")]
-], resize_keyboard=True, one_time_keyboard=True)
-
 end_stones_kb = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="Без изменений"), KeyboardButton(text="Фианиты")],
     [KeyboardButton(text="Бриллианты"), KeyboardButton(text="0")],
     [KeyboardButton(text="✏️ Написать другое")]
 ], resize_keyboard=True, one_time_keyboard=True)
 
-
-# Очистка истории сообщений
 async def clear_survey_history(state: FSMContext, current_chat_id: int):
     state_data = await state.get_data()
     msg_ids = state_data.get("messages_to_delete", [])
@@ -246,11 +288,43 @@ async def has_access_or_alert(event, user_id: int) -> bool:
     else: await event.message.edit_text(text, reply_markup=pay_btn, parse_mode="HTML")
     return False
 
+# --- УПРАВЛЕНИЕ БАЗОЙ (АДМИН) ---
+@dp.message(F.text == "/backup")
+async def cmd_manual_backup(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    await message.answer("🔄 Запуск принудительного сохранения...")
+    await run_full_backup()
+    await message.answer("✅ Полный бэкап базы отправлен в этот чат.")
+
+@dp.message(F.text == "/restore")
+async def cmd_restore_database(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    await state.set_state(AdminRestoreState.waiting_db_file)
+    await message.answer("📥 Отправьте файл бэкапа базы данных `.db`:")
+
+@dp.document(AdminRestoreState.waiting_db_file)
+async def process_restore_db(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID: return
+    document = message.document
+    if not document.file_name.endswith('.db'):
+        return await message.answer("❌ Ошибка: файл должен быть `.db`!")
+    
+    await message.answer("⚙️ Замена файла базы данных...")
+    try:
+        if os.path.exists(DB_NAME):
+            os.remove(DB_NAME)
+        await bot.download(document, destination=DB_NAME)
+        init_db()
+        await message.answer("🎉 <b>УСПЕХ:</b> База данных успешно восстановлена!", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Критическая ошибка: {e}")
+    await state.clear()
+
 # --- ХЕНДЛЕРЫ КОМАНД ---
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO users (telegram_id, reg_date) VALUES (?, ?)", (message.from_user.id, datetime.now().strftime("%Y-%m-%d")))
     conn.commit()
@@ -258,7 +332,7 @@ async def cmd_start(message: Message, state: FSMContext):
     
     _, status = check_subscription(message.from_user.id)
     await message.answer(
-        f"✨ <b>ЮВЕЛИРНЫЙ УЧЕТ v3.0</b> ✨\n\n"
+        f"✨ <b>ЮВЕЛИРНЫЙ УЧЕТ v3.5</b> ✨\n\n"
         f"ℹ️ Статус вашей подписки: <b>{status}</b>\n\n"
         f"Выберите действие на панели:", 
         reply_markup=get_main_menu_kb(), parse_mode="HTML"
@@ -269,7 +343,7 @@ async def back_to_main_callback(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     _, status = check_subscription(callback.from_user.id)
     await callback.message.edit_text(
-        f"✨ <b>ЮВЕЛИРНЫЙ УЧЕТ v3.0</b> ✨\n\n"
+        f"✨ <b>ЮВЕЛИРНЫЙ УЧЕТ v3.5</b> ✨\n\n"
         f"ℹ️ Статус вашей подписки: <b>{status}</b>\n\n"
         f"Выберите нужное действие:", 
         reply_markup=get_main_menu_kb(), parse_mode="HTML"
@@ -317,7 +391,7 @@ async def process_payment_sender_name(message: Message, state: FSMContext):
                  f"🔗 Юзернейм: {username_text}\n"
                  f"🆔 ID: <code>{user.id}</code>\n"
                  f"💳 <b>ОТ КОГО ДЕНЬГИ:</b> {sender_info}\n\n"
-                 f"Если деньги поступили, нажмите кнопку для активации:",
+                 f"Нажмите для подтверждения активации:",
             reply_markup=admin_confirm_kb, parse_mode="HTML"
         )
         await message.answer("⏳ Данные переданы администратору. Доступ включится после подтверждения.", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="/start")]], resize_keyboard=True))
@@ -331,7 +405,7 @@ async def admin_activate_sub(callback: CallbackQuery):
     target_user_id = int(callback.data.split("_")[2])
     new_pay_till = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET pay_till = ? WHERE telegram_id = ?", (new_pay_till, target_user_id))
     conn.commit()
@@ -348,7 +422,7 @@ async def start_new_order(callback: CallbackQuery, state: FSMContext):
     if not await has_access_or_alert(callback, callback.from_user.id): return
     await state.clear()
     await state.set_state(NewOrder.client_name)
-    q_msg = await callback.message.answer("👤 Введите имя или контакты клиента:")
+    q_msg = await callback.message.answer("👤 Введите имя или контакты клиента:", reply_markup=ReplyKeyboardRemove())
     await track_message(state, q_msg.message_id)
     await callback.answer()
 
@@ -357,7 +431,7 @@ async def process_client_name(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
     await state.update_data(client_name=message.text)
     await state.set_state(NewOrder.item_type)
-    q_msg = await message.answer("💍 Что изготавливаем? Выберите вариант или нажмите ввод вручную:", reply_markup=item_type_kb)
+    q_msg = await message.answer("💍 Что изготавливаем? Выберите вариант или введите вручную:", reply_markup=item_type_kb)
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.item_type)
@@ -383,7 +457,7 @@ async def process_probing(message: Message, state: FSMContext):
     val = "" if message.text == "⏩ Пропустить" else message.text
     await state.update_data(probing=val)
     await state.set_state(NewOrder.material)
-    q_msg = await message.answer("🎨 Укажите материал и цвет металла (выберите или нажмите ручной ввод):", reply_markup=material_kb)
+    q_msg = await message.answer("🎨 Укажите материал и цвет металла:", reply_markup=material_kb)
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.material)
@@ -396,7 +470,7 @@ async def process_material_step(message: Message, state: FSMContext):
         
     await state.update_data(material=message.text)
     await state.set_state(NewOrder.size_length)
-    q_msg = await message.answer("📏 Укажите размер или длину изделия (выберите или введите вручную):", reply_markup=size_length_kb)
+    q_msg = await message.answer("📏 Укажите размер или длину изделия:", reply_markup=size_length_kb)
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.size_length)
@@ -409,7 +483,7 @@ async def process_size_length(message: Message, state: FSMContext):
     val = "" if message.text == "⏩ Пропустить" else message.text
     await state.update_data(size_length=val)
     await state.set_state(NewOrder.start_weight)
-    q_msg = await message.answer("⚖️ Введите входной (принятый) вес металла в граммах:")
+    q_msg = await message.answer("⚖️ Введите входной (принятый) вес металла в граммах:", reply_markup=ReplyKeyboardRemove())
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.start_weight)
@@ -419,7 +493,7 @@ async def process_start_weight_step(message: Message, state: FSMContext):
         weight = float(message.text.replace(',', '.'))
         await state.update_data(start_weight=weight)
         await state.set_state(NewOrder.start_stones)
-        q_msg = await message.answer("💎 Какие камни планируются изначально? (Выберите быстрый ответ или ручной ввод):", reply_markup=start_stones_kb)
+        q_msg = await message.answer("💎 Какие камни планируются изначально?:", reply_markup=start_stones_kb)
         await track_message(state, q_msg.message_id)
     except ValueError: 
         q_msg = await message.answer("Введите вес цифрами:")
@@ -434,42 +508,37 @@ async def process_start_stones_step(message: Message, state: FSMContext):
         return
     await state.update_data(start_stones=message.text)
     await state.set_state(NewOrder.gold_rate)
-    q_msg = await message.answer("📈 Укажите расчетный курс золота за грамм (выберите или введите число):", reply_markup=gold_rate_kb)
+    
+    # --- КНОПКИ УБРАНЫ ---
+    q_msg = await message.answer("📈 Укажите расчетный курс золота за грамм (числом) или напишите 0:", reply_markup=ReplyKeyboardRemove())
     await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.gold_rate)
 async def process_gold_rate_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
-    if message.text == "✏️ Свой курс":
-        q_msg = await message.answer("✍️ Введите курс металла цифрами вручную:")
-        await track_message(state, q_msg.message_id)
-        return
     try:
-        rate = 0.0 if message.text == "⏩ Пропустить" else float(message.text.replace(',', '.').replace(' ', ''))
+        rate = float(message.text.replace(',', '.').replace(' ', ''))
         await state.update_data(gold_rate=rate)
         await state.set_state(NewOrder.advance)
-        q_msg = await message.answer("💰 Какую сумму аванса внес клиент? (Выберите из вариантов или укажите свою цифру):", reply_markup=advance_kb)
+        
+        # --- КНОПКИ УБРАНЫ ---
+        q_msg = await message.answer("💰 Какую сумму аванса внес клиент? Введите число (или 0 если нет аванса):")
         await track_message(state, q_msg.message_id)
     except ValueError:
-        q_msg = await message.answer("Введите курс корректным числом:")
+        q_msg = await message.answer("Введите курс корректным числом (например, 6500):")
         await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.advance)
 async def process_advance_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
-    if message.text == "✏️ Другая сумма":
-        q_msg = await message.answer("✍️ Введите точную сумму аванса числом вручную:")
-        await track_message(state, q_msg.message_id)
-        return
     try:
-        clean_text = message.text.replace("0 (Без аванса)", "0").replace(',', '.').replace(' ', '')
-        advance = float(clean_text)
+        advance = float(message.text.replace(',', '.').replace(' ', ''))
         await state.update_data(advance=advance)
         await state.set_state(NewOrder.photo)
         q_msg = await message.answer("📸 Прикрепите фотографию/эскиз или пропустите:", reply_markup=skip_photo_kb)
         await track_message(state, q_msg.message_id)
     except ValueError: 
-        q_msg = await message.answer("Введите сумму аванса числом:")
+        q_msg = await message.answer("Введите сумму аванса числом (например, 3000):")
         await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.photo, F.photo)
@@ -477,14 +546,14 @@ async def process_photo_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
     await save_order_to_db(message.photo[-1].file_id, message, state)
 
-@dp.message(NewOrder.photo, F.text == "⏩ Пропустить фото")
+@dp.message(NewOrder.photo, F.text == "⏩ Пропустить photo" or F.text == "⏩ Пропустить фото")
 async def process_skip_photo_step(message: Message, state: FSMContext): 
     await track_message(state, message.message_id)
     await save_order_to_db(None, message, state)
 
 async def save_order_to_db(photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO orders (
@@ -509,7 +578,6 @@ async def save_order_to_db(photo_id, message: Message, state: FSMContext):
         f"📦 Материал: {data['material']}\n"
         f"📏 Размер/Длина: {data['size_length']}\n"
         f"⚖️ Входной вес: {data['start_weight']} г\n"
-        f"💎 Камни: {data['start_stones']}\n"
         f"📈 Курс металла: {data['gold_rate']} руб.\n"
         f"💰 Аванс: {data['advance']} руб."
     )
@@ -523,7 +591,7 @@ async def start_close_order_callback(callback: CallbackQuery, state: FSMContext)
     if not await has_access_or_alert(callback, callback.from_user.id): return
     await state.clear()
     await state.set_state(CloseOrder.order_id)
-    q_msg = await callback.message.answer("🏁 Введите ID заказа для его закрытия:")
+    q_msg = await callback.message.answer("🏁 Введите ID заказа для его закрытия:", reply_markup=ReplyKeyboardRemove())
     await track_message(state, q_msg.message_id)
     await callback.answer()
 
@@ -532,7 +600,7 @@ async def process_close_id(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
     try:
         order_id = int(message.text)
-        conn = sqlite3.connect('jewelry_orders.db')
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("SELECT client_name, start_weight, advance, start_stones, gold_rate FROM orders WHERE id = ? AND telegram_id = ? AND status = 'В работе'", (order_id, message.from_user.id))
         order = cursor.fetchone()
@@ -543,7 +611,7 @@ async def process_close_id(message: Message, state: FSMContext):
             q_msg = await message.answer(f"Введите чистый вес готового металла (в граммах):")
             await track_message(state, q_msg.message_id)
         else: 
-            q_msg = await message.answer("Заказ не найден.")
+            q_msg = await message.answer("Заказ не найден или уже выполнен.")
             await track_message(state, q_msg.message_id)
     except ValueError: 
         q_msg = await message.answer("ID должен быть числом:")
@@ -555,7 +623,7 @@ async def process_end_weight(message: Message, state: FSMContext):
     try:
         await state.update_data(end_weight=float(message.text.replace(',', '.')))
         await state.set_state(CloseOrder.end_stones_weight)
-        q_msg = await message.answer("Введите вес закрепленных камней в граммах (или 0):", reply_markup=zero_kb)
+        q_msg = await message.answer("Введите вес закрепленных камней (в граммах или 0):", reply_markup=zero_kb)
         await track_message(state, q_msg.message_id)
     except ValueError: 
         q_msg = await message.answer("Введите чистый вес числом:")
@@ -567,7 +635,7 @@ async def process_end_stones_weight(message: Message, state: FSMContext):
     try:
         await state.update_data(end_stones_weight=float(message.text.replace(',', '.')))
         await state.set_state(CloseOrder.end_stones)
-        q_msg = await message.answer("Введите описание закрепленных камней (выберите или напишите вручную):", reply_markup=end_stones_kb)
+        q_msg = await message.answer("Введите описание закрепленных камней:", reply_markup=end_stones_kb)
         await track_message(state, q_msg.message_id)
     except ValueError: 
         q_msg = await message.answer("Введите вес камней числом:")
@@ -582,7 +650,7 @@ async def process_end_stones(message: Message, state: FSMContext):
         return
     await state.update_data(end_stones=message.text)
     await state.set_state(CloseOrder.price)
-    q_msg = await message.answer("Укажите итоговую стоимость работы (руб):")
+    q_msg = await message.answer("Укажите итоговую стоимость работы (руб):", reply_markup=ReplyKeyboardRemove())
     await track_message(state, q_msg.message_id)
 
 @dp.message(CloseOrder.price)
@@ -610,78 +678,101 @@ async def process_skip_end_photo(message: Message, state: FSMContext):
 async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
     
-    # РАСЧЕТЫ ВЕСА
-    loss = round((data['end_weight'] * 1.09) - data['start_weight'], 3)
-    total_metal = round(bytes(abs(loss)) + data['end_weight'], 3) if hasattr(data, 'abs') else round(abs(loss) + data['end_weight'], 3)
+    start_w = data['start_weight']
+    end_w = data['end_weight']
+    gold_rate = data['gold_rate']
     
-    # Формируем строку потерь со скобками в рублях, если ушли в плюс
-    loss_str = f"{loss} г"
-    if loss > 0:
-        rub_value = round(loss * data['gold_rate'], 2)
-        loss_str += f" (+{rub_value} руб.)"
+    actual_loss = round(start_w - end_w, 3)
+    allowed_consumption = end_w * 1.09
+    difference = round(start_w - allowed_consumption, 3)
+    
+    if difference >= 0:
+        rub_bonus = round(difference * gold_rate, 2)
+        diff_str = f"+{difference} г (Остаток у мастера на +{rub_bonus} руб.)"
+    else:
+        rub_debt = round(abs(difference) * gold_rate, 2)
+        diff_str = f"{difference} г (Перерасход металла на -{rub_debt} руб.)"
         
-    # ИТОГОВАЯ СУММА К ОПЛАТЕ: Стоимость работы МИНУС аванс
-    final_price = round(data['price'] - data['advance'], 2)
+    to_pay = round(data['price'] - data['advance'], 2)
     
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute('UPDATE orders SET end_weight=?, end_stones_weight=?, end_stones=?, price=?, end_photo_id=?, status="Завершен" WHERE id=? AND telegram_id=?', (data['end_weight'], data['end_stones_weight'], data['end_stones'], final_price, end_photo_id, data['order_id'], message.from_user.id))
+    cursor.execute('''
+        UPDATE orders 
+        SET end_weight=?, end_stones_weight=?, end_stones=?, price=?, end_photo_id=?, status="Завершен" 
+        WHERE id=? AND telegram_id=?
+    ''', (end_w, data['end_stones_weight'], data['end_stones'], data['price'], end_photo_id, data['order_id'], message.from_user.id))
     conn.commit()
     conn.close()
     
     await clear_survey_history(state, message.chat.id)
     
     caption = (
-        f"🎉 Заказ №{data['order_id']} успешно закрыт!\n\n"
-        f"⚖️ Входной вес металла: {data['start_weight']} г\n"
-        f"⚖️ Чистый вес готового металла: {data['end_weight']} г\n"
-        f"💎 Вес закрепленных камней: {data['end_stones_weight']} г ({data['end_stones']})\n"
-        f"📉 Потери (металл +9%): {loss_str}\n"
-        f"📊 Итог (Потери + Чистый вес): {total_metal} г\n"
-        f"💰 Сумма: {final_price} руб."
+        f"🎉 <b>Заказ №{data['order_id']} успешно закрыт!</b>\n\n"
+        f"⚖️ Входной вес металла: {start_w} г\n"
+        f"⚖️ Чистый вес готового изделия: {end_w} г\n"
+        f"📉 Фактические потери (угар): {actual_loss} г\n"
+        f"📊 Разница (с учетом нормы +9%): {diff_str}\n\n"
+        f"💰 <b>Остаток к оплате за работу: {to_pay} руб.</b> (Аванс: {data['advance']} руб.)"
     )
-    await (message.answer_photo(photo=end_photo_id, caption=caption) if end_photo_id else message.answer(caption))
+    await (message.answer_photo(photo=end_photo_id, caption=caption, parse_mode="HTML") if end_photo_id else message.answer(caption, parse_mode="HTML"))
     await state.clear()
     await message.answer("Главное меню:", reply_markup=get_main_menu_kb())
 
-# --- ОСТАЛЬНЫЕ ФУНКЦИИ ---
+# --- ПРОСМОТР АКТИВНЫХ ЗАКАЗОВ ---
 @dp.callback_query(F.data == "menu_active_orders")
 async def show_active_orders_callback(callback: CallbackQuery):
     if not await has_access_or_alert(callback, callback.from_user.id): return
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT id, client_name, item_type, material, start_weight FROM orders WHERE status = 'В работе' AND telegram_id = ?", (callback.from_user.id,))
     orders = cursor.fetchall()
     conn.close()
-    if not orders: return await callback.message.edit_text("📭 Активных заказов нет.", reply_markup=back_to_menu_kb)
+    if not orders: return await callback.message.edit_text("📭 Заказов в работе сейчас нет.", reply_markup=back_to_menu_kb)
     response = "📋 <b>Список изделий в работе:</b>\n\n"
     for o in orders: response += f"🆔 <b>ID: {o[0]}</b> | 👤 {o[1]} | 💍 {o[2]} | 🎨 {o[3]} | ⚖️ {o[4]}г\n"
     await callback.message.edit_text(response, reply_markup=back_to_menu_kb, parse_mode="HTML")
     await callback.answer()
 
+# --- НОВАЯ ФУНКЦИЯ: АРХИВ ЗАВЕРШЕННЫХ ЗАКАЗОВ ---
+@dp.callback_query(F.data == "menu_archive_orders")
+async def show_archive_orders_callback(callback: CallbackQuery):
+    if not await has_access_or_alert(callback, callback.from_user.id): return
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, client_name, item_type, end_weight, price FROM orders WHERE status = 'Завершен' AND telegram_id = ?", (callback.from_user.id,))
+    orders = cursor.fetchall()
+    conn.close()
+    if not orders: return await callback.message.edit_text("📦 Архив пуст. Вы еще не закрыли ни одного заказа.", reply_markup=back_to_menu_kb)
+    response = "📦 <b>Архив выполненных заказов:</b>\n\n"
+    for o in orders: response += f"🏁 <b>№{o[0]}</b> | {o[1]} | {o[2]} | Вес: {o[3]}г | Сумма: {o[4]} руб.\n"
+    await callback.message.edit_text(response, reply_markup=back_to_menu_kb, parse_mode="HTML")
+    await callback.answer()
+
+# --- СКАЧАТЬ КРАСИВЫЙ EXCEL ---
 @dp.callback_query(F.data == "menu_excel")
 async def export_to_excel_callback(callback: CallbackQuery):
     if not await has_access_or_alert(callback, callback.from_user.id): return
-    df_beauty = get_excel_report(user_id=callback.from_user.id)
-    if df_beauty is None: return await callback.message.edit_text("База пуста.", reply_markup=back_to_menu_kb)
     filename = f"Ювелирные_Заказы_{callback.from_user.id}.xlsx"
-    df_beauty.to_excel(filename, index=False)
-    await callback.message.answer_document(document=FSInputFile(filename), caption="📋 Ваш отчет Excel!")
+    success = generate_excel_file(callback.from_user.id, filename)
+    if not success: return await callback.message.edit_text("База пуста. Добавьте хотя бы один заказ.", reply_markup=back_to_menu_kb)
+    await callback.message.answer_document(document=FSInputFile(filename), caption="📊 Общая таблица заказов сформирована. Колонки автоматически расширены, расчет курса добавлен!")
     if os.path.exists(filename): os.remove(filename)
     await callback.answer()
 
+# --- РЕДАКТИРОВАНИЕ ЗАКАЗА ---
 @dp.callback_query(F.data == "menu_edit_order")
 async def start_edit_order_callback(callback: CallbackQuery, state: FSMContext):
     if not await has_access_or_alert(callback, callback.from_user.id): return
     await state.set_state(EditOrder.order_id)
-    await callback.message.answer("✏️ Введите ID активного заказа для изменения:")
+    await callback.message.answer("✏️ Введите ID активного заказа для изменения:", reply_markup=ReplyKeyboardRemove())
     await callback.answer()
 
 @dp.message(EditOrder.order_id)
 async def process_edit_id(message: Message, state: FSMContext):
     try:
         order_id = int(message.text)
-        conn = sqlite3.connect('jewelry_orders.db')
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("SELECT id, client_name FROM orders WHERE id = ? AND telegram_id = ? AND status = 'В работе'", (order_id, message.from_user.id))
         order = cursor.fetchone()
@@ -695,7 +786,7 @@ async def process_edit_id(message: Message, state: FSMContext):
                 [InlineKeyboardButton(text="⚖️ Изменить Входной вес", callback_data="edit_start_weight")]
             ])
             await message.answer(f"Выбран заказ №{order[0]}. Выберите поле:", reply_markup=inline_kb)
-        else: await message.answer("Заказ не найден.")
+        else: await message.answer("Активный заказ с таким ID не найден.")
     except ValueError: await message.answer("ID должен быть числом:")
 
 @dp.callback_query(F.data.startswith("edit_"))
@@ -711,7 +802,7 @@ async def process_new_value(message: Message, state: FSMContext):
     data = await state.get_data()
     val = message.text
     if data['edit_field'] == "start_weight": val = float(val.replace(',', '.'))
-    conn = sqlite3.connect('jewelry_orders.db')
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(f"UPDATE orders SET {data['edit_field']} = ? WHERE id = ? AND telegram_id = ?", (val, data['order_id'], message.from_user.id))
     conn.commit()
@@ -719,12 +810,17 @@ async def process_new_value(message: Message, state: FSMContext):
     await message.answer("✅ База обновлена!", reply_markup=get_main_menu_kb())
     await state.clear()
 
+# --- СТАРТ ПРИЛОЖЕНИЯ ---
 async def main():
     init_db()
     await start_background_web_server()
     asyncio.create_task(backup_scheduler())
+    asyncio.create_task(self_ping())
     print(" Бот запускает Polling...")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 if __name__ == '__main__':
     asyncio.run(main())
