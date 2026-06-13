@@ -7,10 +7,10 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiohttp import web  # Обязательно для работы на бесплатном тарифе Render (убирает No ports / Port error)
 
 # --- НАСТРОЙКА БОТА ---
 TOKEN = "8731687908:AAF1K5UJjSUbY5Nwgv1ye4gTay36i130GMs"
-ADMIN_ID = 481597187  # Твой Telegram ID для автоматических отчетов (при необходимости)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -38,19 +38,31 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ФУНКЦИЯ ДЛЯ EXCEL (С НОВЫМИ РАСЧЕТАМИ) ---
-def get_excel_report(user_id=None, all_orders=False):
+# --- ВЕБ-СЕРВЕР ДЛЯ ПРОХОЖДЕНИЯ ПРОВЕРОК RENDER ---
+async def handle(request):
+    return web.Response(text="Ювелирный бот успешно запущен и работает!")
+
+async def start_background_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Считываем порт, назначенный платформой Render, или ставим дефолтный 10000
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Фоновый веб-сервер запущен на порту {port}. Проверка Render пройдена.")
+
+# --- ФУНКЦИЯ ДЛЯ EXCEL С ОБНОВЛЕННЫМИ РАСЧЕТАМИ ---
+def get_excel_report(user_id=None):
     conn = sqlite3.connect('jewelry_orders.db')
-    if all_orders:
-        df = pd.read_sql_query("SELECT * FROM orders", conn)
-    else:
-        df = pd.read_sql_query("SELECT * FROM orders WHERE telegram_id = ?", conn, params=(user_id,))
+    df = pd.read_sql_query("SELECT * FROM orders WHERE telegram_id = ?", conn, params=(user_id,))
     conn.close()
     
     if df.empty:
         return None
         
-    # Расчет по новой формуле
+    # Расчет по новым правилам (металл +9%)
     df['Потери металла, г'] = ((df['end_weight'] * 1.09) - df['start_weight']).round(3)
     df['Потери + Чистый вес, г'] = (df['Потери металла, г'] + df['end_weight']).round(3)
     
@@ -66,7 +78,6 @@ def get_excel_report(user_id=None, all_orders=False):
         'price': 'Стоимость (руб)',
         'status': 'Статус заказа'
     })
-    
     df_beauty = df_beauty.drop(columns=['telegram_id', 'start_photo_id', 'end_photo_id'], errors='ignore')
     return df_beauty
 
@@ -100,22 +111,33 @@ main_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-skip_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="⏩ Пропустить фото")]],
-    resize_keyboard=True
-)
+skip_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⏩ Пропустить фото")]], resize_keyboard=True)
 
 # --- ХЕНДЛЕРЫ ---
-
 @dp.message(F.text == "/start")
 async def cmd_start(message: Message):
     await message.answer("Привет! Я бот-помощник для личного учета ювелирных заказов.", reply_markup=main_kb)
 
-# --- ВЫГРУЗКА В EXCEL ---
+@dp.message(F.text == "📋 Активные заказы")
+async def show_active_orders(message: Message):
+    conn = sqlite3.connect('jewelry_orders.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, client_name, material, start_weight FROM orders WHERE status = 'В работе' AND telegram_id = ?", (message.from_user.id,))
+    orders = cursor.fetchall()
+    conn.close()
+    
+    if not orders:
+        await message.answer("У вас сейчас нет активных заказов в работе.")
+        return
+        
+    response = "<b>Ваши заказы в работе:</b>\n\n"
+    for o in orders:
+        response += f"🆔 ID: {o[0]} | 👤 {o[1]} | 📦 {o[2]} | ⚖️ Входной: {o[3]}г\n"
+    await message.answer(response, parse_mode="HTML")
+
 @dp.message(F.text == "📊 Отчет в Excel")
 async def export_to_excel(message: Message):
     await message.answer("🔄 Формирую ваш личный отчет, подождите немного...")
-    
     df_beauty = get_excel_report(user_id=message.from_user.id)
     if df_beauty is None:
         await message.answer("Ваша база данных пока пуста. Нечего выгружать.")
@@ -124,8 +146,7 @@ async def export_to_excel(message: Message):
     filename = f"Ювелирные_Заказы_{message.from_user.id}.xlsx"
     df_beauty.to_excel(filename, index=False)
     
-    excel_file = FSInputFile(filename)
-    await message.answer_document(document=excel_file, caption="📋 Вот твой свежий отчет по твоим заказам!")
+    await message.answer_document(document=FSInputFile(filename), caption="📋 Вот твой свежий отчет по твоим заказам!")
     if os.path.exists(filename):
         os.remove(filename)
 
@@ -165,8 +186,7 @@ async def process_start_stones(message: Message, state: FSMContext):
 
 @dp.message(NewOrder.photo, F.photo)
 async def process_photo(message: Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id
-    await save_order_to_db(photo_id, message, state)
+    await save_order_to_db(message.photo[-1].file_id, message, state)
 
 @dp.message(NewOrder.photo, F.text == "⏩ Пропустить фото")
 async def process_skip_photo(message: Message, state: FSMContext):
@@ -184,21 +204,95 @@ async def save_order_to_db(photo_id, message: Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    caption = (
-        f"✅ Заказ успешно создан!\n"
-        f"🆔 <b>ID заказа: {order_id}</b>\n"
-        f"👤 Клиент: {data['client_name']}\n"
-        f"📦 Материал: {data['material']}\n"
-        f"⚖️ Входной вес: {data['start_weight']} г\n"
-        f"💎 Камни: {data['start_stones']}"
-    )
+    caption = f"✅ Заказ успешно создан!\n🆔 <b>ID заказа: {order_id}</b>\n👤 Клиент: {data['client_name']}\n📦 Материал: {data['material']}\n⚖️ Входной вес: {data['start_weight']} г\n💎 Камни: {data['start_stones']}"
     if photo_id:
         await message.answer_photo(photo=photo_id, caption=caption, parse_mode="HTML", reply_markup=main_kb)
     else:
         await message.answer(caption, parse_mode="HTML", reply_markup=main_kb)
     await state.clear()
 
-# --- СЦЕНАРИЙ: ЗАВЕРШЕНИЕ ЗАКАЗА ---
+# --- СЦЕНАРИЙ: РЕДАКТИРОВАНИЕ ЗАКАЗА ---
+@dp.message(F.text == "✏️ Редактировать")
+async def start_edit_order(message: Message, state: FSMContext):
+    await state.set_state(EditOrder.order_id)
+    await message.answer("Введите ID заказа, который нужно изменить:")
+
+@dp.message(EditOrder.order_id)
+async def process_edit_id(message: Message, state: FSMContext):
+    try:
+        order_id = int(message.text)
+        conn = sqlite3.connect('jewelry_orders.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, client_name, start_photo_id FROM orders WHERE id = ? AND telegram_id = ? AND status = 'В работе'", (order_id, message.from_user.id))
+        order = cursor.fetchone()
+        conn.close()
+        
+        if order:
+            await state.update_data(order_id=order_id)
+            inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="👤 Имя клиента", callback_data="edit_client_name")],
+                [InlineKeyboardButton(text="📦 Материал", callback_data="edit_material")],
+                [InlineKeyboardButton(text="⚖️ Входной вес", callback_data="edit_start_weight")],
+                [InlineKeyboardButton(text="💎 Планируемые камни", callback_data="edit_start_stones")],
+                [InlineKeyboardButton(text="📸 Обновить стартовое фото", callback_data="edit_start_photo_id")]
+            ])
+            text = f"Выбран заказ №{order[0]} (Клиент: {order[1]}).\nЧто изменить?"
+            if order[2]:
+                await message.answer_photo(photo=order[2], caption=text, reply_markup=inline_kb)
+            else:
+                await message.answer(text, reply_markup=inline_kb)
+        else:
+            await message.answer("Активный заказ с таким ID в вашем списке не найден.")
+            await state.clear()
+    except ValueError:
+        await message.answer("Введите корректный ID числом:")
+
+@dp.callback_query(F.data.startswith("edit_"))
+async def process_edit_choice(callback: CallbackQuery, state: FSMContext):
+    field = callback.data.split("_", 1)[1]
+    await state.update_data(edit_field=field)
+    await state.set_state(EditOrder.waiting_new_value)
+    
+    fields_ru = {
+        "client_name": "новое имя клиента",
+        "material": "новый материал/пробу",
+        "start_weight": "новый входной вес",
+        "start_stones": "новый список камней",
+        "start_photo_id": "новое стартовое фото (отправьте его)"
+    }
+    await callback.message.answer(f"Ожидаю {fields_ru[field]}:")
+    await callback.answer()
+
+@dp.message(EditOrder.waiting_new_value)
+async def process_new_value(message: Message, state: FSMContext):
+    data = await state.get_data()
+    field = data['edit_field']
+    order_id = data['order_id']
+    
+    if field == "start_photo_id":
+        if message.photo:
+            new_value = message.photo[-1].file_id
+        else:
+            await message.answer("Пожалуйста, отправьте фото:")
+            return
+    else:
+        new_value = message.text
+        if field == "start_weight":
+            try:
+                new_value = float(new_value.replace(',', '.'))
+            except ValueError:
+                await message.answer("Ошибка! Вес должен быть числом:")
+                return
+
+    conn = sqlite3.connect('jewelry_orders.db')
+    cursor = conn.cursor()
+    cursor.execute(f"UPDATE orders SET {field} = ? WHERE id = ? AND telegram_id = ?", (new_value, order_id, message.from_user.id))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ Заказ №{order_id} успешно обновлен!", reply_markup=main_kb)
+    await state.clear()
+
+# --- СЦЕНАРИЙ: ЗАВЕРШЕНИЕ ЗАКАЗА (С УЧЕТОМ КАМНЕЙ И НОВЫХ ПОТЕРЬ) ---
 @dp.message(F.text == "🏁 Завершить заказ")
 async def start_close_order(message: Message, state: FSMContext):
     await state.set_state(CloseOrder.order_id)
@@ -210,16 +304,20 @@ async def process_close_id(message: Message, state: FSMContext):
         order_id = int(message.text)
         conn = sqlite3.connect('jewelry_orders.db')
         cursor = conn.cursor()
-        cursor.execute("SELECT client_name, material, start_weight, start_photo_id FROM orders WHERE id = ? AND telegram_id = ? AND status = 'В работе'", (order_id, message.from_user.id))
+        cursor.execute("SELECT client_name, start_weight, start_photo_id FROM orders WHERE id = ? AND telegram_id = ? AND status = 'В работе'", (order_id, message.from_user.id))
         order = cursor.fetchone()
         conn.close()
         
         if order:
-            await state.update_data(order_id=order_id, start_weight=order[2])
+            await state.update_data(order_id=order_id, start_weight=order[1])
             await state.set_state(CloseOrder.end_weight)
-            await message.answer(f"Заказ найден (Клиент: {order[0]}).\nВведите готовый вес ТОЛЬКО металла (в граммах):")
+            text = f"Заказ найден (Клиент: {order[0]}).\nВведите готовый вес ТОЛЬКО металла (в граммах):"
+            if order[2]:
+                await message.answer_photo(photo=order[2], caption=text)
+            else:
+                await message.answer(text)
         else:
-            await message.answer("Заказ с таким ID не найден в вашем списке или уже завершен.")
+            await message.answer("Заказ с таким ID не найден или уже завершен.")
             await state.clear()
     except ValueError:
         await message.answer("ID должен быть числом:")
@@ -230,7 +328,7 @@ async def process_end_weight(message: Message, state: FSMContext):
         weight = float(message.text.replace(',', '.'))
         await state.update_data(end_weight=weight)
         await state.set_state(CloseOrder.end_stones_weight)
-        await message.answer("Введите общий вес закрепленных камней (в граммах, если камней нет — введите 0):")
+        await message.answer("Введите общий вес закрепленных камней (число в граммах, если камней нет — введите 0):")
     except ValueError:
         await message.answer("Введите вес числом:")
 
@@ -242,7 +340,7 @@ async def process_end_stones_weight(message: Message, state: FSMContext):
         await state.set_state(CloseOrder.end_stones)
         await message.answer("Какие камни фактически закрепили? (Наименование/количество, если нет — напишите 'Нет'):")
     except ValueError:
-        await message.answer("Введите вес камней числом:")
+        await message.answer("Введите вес числом:")
 
 @dp.message(CloseOrder.end_stones)
 async def process_end_stones(message: Message, state: FSMContext):
@@ -262,8 +360,7 @@ async def process_price(message: Message, state: FSMContext):
 
 @dp.message(CloseOrder.end_photo, F.photo)
 async def process_end_photo(message: Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id
-    await finalize_order(photo_id, message, state)
+    await finalize_order(message.photo[-1].file_id, message, state)
 
 @dp.message(CloseOrder.end_photo, F.text == "⏩ Пропустить фото")
 async def process_skip_end_photo(message: Message, state: FSMContext):
@@ -272,10 +369,8 @@ async def process_skip_end_photo(message: Message, state: FSMContext):
 async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
     
-    # Расчет по новым правилам:
-    # 1. Потери металла = (чистый готовый вес металла * 1.09) - изначальный вес металла
+    # Расчет по вашим новым правилам:
     loss = round((data['end_weight'] * 1.09) - data['start_weight'], 3)
-    # 2. Потери + чистый вес готового металла
     total_metal_balance = round(loss + data['end_weight'], 3)
     
     conn = sqlite3.connect('jewelry_orders.db')
@@ -303,29 +398,12 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
         await message.answer(caption, reply_markup=main_kb)
     await state.clear()
 
-# --- ПРОСМОТР АКТИВНЫХ ---
-@dp.message(F.text == "📋 Активные заказы")
-async def show_active_orders(message: Message):
-    conn = sqlite3.connect('jewelry_orders.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, client_name, material, start_weight FROM orders WHERE status = 'В работе' AND telegram_id = ?", (message.from_user.id,))
-    orders = cursor.fetchall()
-    conn.close()
-    
-    if not orders:
-        await message.answer("У вас сейчас нет активных заказов в работе.")
-        return
-        
-    response = "<b>Ваши заказы в работе:</b>\n\n"
-    for o in orders:
-        response += f"🆔 ID: {o[0]} | 👤 {o[1]} | 📦 {o[2]} | ⚖️ {o[3]}г\n"
-    
-    await message.answer(response, parse_mode="HTML")
-
 # --- ЗАПУСК БОТА ---
 async def main():
     init_db()
-    print("Бот запущен с учетом веса камней и новой формулой баланса металла!")
+    # Запуск фонового сервера, чтобы Render бесплатно держал бота в статусе Live
+    await start_background_web_server()
+    print("Бот полностью готов к работе!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
