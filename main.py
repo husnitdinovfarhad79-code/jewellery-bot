@@ -142,14 +142,19 @@ async def run_full_backup():
     except Exception as e: 
         print(f"Ошибка планировщика бэкапов: {e}")
 
-# --- КРАСИВЫЙ ЭКСПОРТ В EXCEL (С РАСШИРЕННЫМИ КОЛОНКАМИ И КУРСОМ) ---
+# --- КРАСИВЫЙ ЭКСПОРТ В EXCEL ---
 def generate_excel_file(user_id, filename):
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM orders WHERE telegram_id = ?", conn, params=(user_id,))
     conn.close()
     if df.empty: return False
     
-    # Расширенные расчеты с учетом курса золота
+    # Расширенные расчеты с защитой от пустых значений завершения
+    df['end_weight'] = df['end_weight'].fillna(0.0)
+    df['price'] = df['price'].fillna(0.0)
+    df['advance'] = df['advance'].fillna(0.0)
+    df['gold_rate'] = df['gold_rate'].fillna(0.0)
+    
     df['Фактические потери, г'] = (df['start_weight'] - df['end_weight']).round(3)
     df['Разница с учетом 9%, г'] = (df['start_weight'] - (df['end_weight'] * 1.09)).round(3)
     
@@ -159,7 +164,7 @@ def generate_excel_file(user_id, filename):
     # Остаток чисто за саму работу (Цена работы - Аванс)
     df['Остаток за работу (руб)'] = (df['price'] - df['advance']).round(2)
     
-    # Общий финансовый итог для клиента (Работа - Аванс - Стоимость возвращенного металла)
+    # Общий финансовый итог для клиента
     df['Общий итог к оплате клиентом (руб)'] = (df['Остаток за работу (руб)'] - df['Стоимость разницы металла (руб)']).round(2)
     
     # Переименование колонок для красоты
@@ -170,17 +175,17 @@ def generate_excel_file(user_id, filename):
         'end_stones_weight': 'Вес камней (г)', 'end_stones': 'Описание камней', 'price': 'Стоимость работы (руб)', 'status': 'Статус заказа'
     })
     
-    # Удаляем служебные колонки фоток
+    # Удаляем служебные колонки
     df = df.drop(columns=['telegram_id','start_photo_id','end_photo_id','start_stones'], errors='ignore')
     
-    # Запись в Excel с авто-подбором ширины колонок (чтобы не было сжато)
+    # Запись в Excel с авто-подбором ширины колонок
     with pd.ExcelWriter(filename, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Заказы')
         worksheet = writer.sheets['Заказы']
         for col in worksheet.columns:
             max_len = max(len(str(cell.value or '')) for cell in col)
             col_letter = col[0].column_letter
-            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12) # Добавляем отступы
+            worksheet.column_dimensions[col_letter].width = max(max_len + 3, 12)
             
     return True
 
@@ -508,8 +513,6 @@ async def process_start_stones_step(message: Message, state: FSMContext):
         return
     await state.update_data(start_stones=message.text)
     await state.set_state(NewOrder.gold_rate)
-    
-    # --- КНОПКИ УБРАНЫ ---
     q_msg = await message.answer("📈 Укажите расчетный курс золота за грамм (числом) или напишите 0:", reply_markup=ReplyKeyboardRemove())
     await track_message(state, q_msg.message_id)
 
@@ -520,8 +523,6 @@ async def process_gold_rate_step(message: Message, state: FSMContext):
         rate = float(message.text.replace(',', '.').replace(' ', ''))
         await state.update_data(gold_rate=rate)
         await state.set_state(NewOrder.advance)
-        
-        # --- КНОПКИ УБРАНЫ ---
         q_msg = await message.answer("💰 Какую сумму аванса внес клиент? Введите число (или 0 если нет аванса):")
         await track_message(state, q_msg.message_id)
     except ValueError:
@@ -546,7 +547,7 @@ async def process_photo_step(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
     await save_order_to_db(message.photo[-1].file_id, message, state)
 
-@dp.message(NewOrder.photo, F.text == "⏩ Пропустить photo" or F.text == "⏩ Пропустить фото")
+@dp.message(NewOrder.photo, F.text.in_(["⏩ Пропустить фото", "⏩ Пропустить photo"]))
 async def process_skip_photo_step(message: Message, state: FSMContext): 
     await track_message(state, message.message_id)
     await save_order_to_db(None, message, state)
@@ -670,7 +671,8 @@ async def process_end_photo(message: Message, state: FSMContext):
     await track_message(state, message.message_id)
     await finalize_order(message.photo[-1].file_id, message, state)
 
-@dp.message(CloseOrder.end_photo, F.text == "⏩ Пропустить фото")
+# Исправлен баг валидации кнопки пропуска фото при завершении заказа
+@dp.message(CloseOrder.end_photo, F.text.is_("⏩ Пропустить фото"))
 async def process_skip_end_photo(message: Message, state: FSMContext): 
     await track_message(state, message.message_id)
     await finalize_order(None, message, state)
@@ -734,7 +736,7 @@ async def show_active_orders_callback(callback: CallbackQuery):
     await callback.message.edit_text(response, reply_markup=back_to_menu_kb, parse_mode="HTML")
     await callback.answer()
 
-# --- НОВАЯ ФУНКЦИЯ: АРХИВ ЗАВЕРШЕННЫХ ЗАКАЗОВ ---
+# --- АРХИВ ЗАВЕРШЕННЫХ ЗАКАЗОВ ---
 @dp.callback_query(F.data == "menu_archive_orders")
 async def show_archive_orders_callback(callback: CallbackQuery):
     if not await has_access_or_alert(callback, callback.from_user.id): return
