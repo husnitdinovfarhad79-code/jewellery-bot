@@ -80,7 +80,7 @@ def check_subscription(user_id):
         if datetime.now() <= pay_till:
             return True, f"Подписка активна до {user[1]}"
             
-    return False, "🔴 Срок действия подписки исчез"
+    return False, "🔴 Срок действия подписки истек"
 
 # --- МИКРО-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request): 
@@ -163,7 +163,7 @@ def generate_excel_file(user_id, filename):
         df = df.rename(columns={
             'id': 'ID Заказа', 'client_name': 'Клиент', 'item_type': 'Тип изделия', 'probing': 'Проба',
             'material': 'Материал', 'size_length': 'Размер/Длина', 'start_weight': 'Входной вес (г)', 
-            'gold_rate': 'Курс золото (руб/г)', 'advance': 'Внесенный Аванс (руб)', 'end_weight': 'Чистый вес (г)', 
+            'gold_rate': 'Курс золото (руб/г)', 'advance': 'Внесенный Аванс (руб)', 'end_weight': 'Чистый вес без камней (г)', 
             'end_stones_weight': 'Вес камней (г)', 'end_stones': 'Описание камней', 'price': 'Стоимость работы (руб)', 'status': 'Статус заказа'
         })
         
@@ -572,6 +572,7 @@ async def save_order_to_db(photo_id, message: Message, state: FSMContext):
         f"📦 Материал: {data['material']}\n"
         f"📏 Размер/Длина: {data['size_length']}\n"
         f"⚖️ Входной вес: {data['start_weight']} г\n"
+        f"💎 Камни (вид, вес, характеристики): {data['start_stones']}\n"
         f"📈 Курс металла: {data['gold_rate']} руб.\n"
         f"💰 Аванс: {data['advance']} руб."
     )
@@ -677,7 +678,7 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     end_w = data['end_weight']
     gold_rate = data['gold_rate']
     
-    # ТВОЯ ФОРМУЛА: Чистый вес + 9% - Входной вес
+    # ФОРМУЛА: Чистый вес * 1.09 - Входной вес
     actual_loss = round((end_w * 1.09) - start_w, 3)
     loss_price = round(actual_loss * gold_rate, 2)
     
@@ -698,7 +699,7 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     caption = (
         f"🎉 <b>Заказ №{data['order_id']} успешно закрыт!</b>\n\n"
         f"⚖️ Входной вес металла: {start_w} г\n"
-        f"⚖️ Чистый вес готового изделия: {end_w} г\n"
+        f"⚖️ Чистый вес готового изделия без камней: {end_w} г\n"
         f"📉 Фактические потери (угар): {actual_loss} г\n"
         f"💰 Стоимость угара металла: {loss_price} руб.\n\n"
         f"💸 <b>Остаток к оплате за работу: {to_pay} руб.</b> (Аванс: {data['advance']} руб.)"
