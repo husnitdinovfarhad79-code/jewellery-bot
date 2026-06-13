@@ -155,17 +155,14 @@ def generate_excel_file(user_id, filename):
         df['advance'] = df['advance'].fillna(0.0)
         df['gold_rate'] = df['gold_rate'].fillna(0.0)
         
-        df['Фактические потери, г'] = (df['start_weight'] - df['end_weight']).round(3)
-        df['Разница с учетом 9%, г'] = (df['start_weight'] - (df['end_weight'] * 1.09)).round(3)
-        
-        df['Стоимость разницы металла (руб)'] = (df['Разница с учетом 9%, г'] * df['gold_rate']).round(2)
+        df['Фактические потери (угар), г'] = (df['start_weight'] - df['end_weight']).round(3)
+        df['Стоимость угара (руб)'] = (df['Фактические потери (угар), г'] * df['gold_rate']).round(2)
         df['Остаток за работу (руб)'] = (df['price'] - df['advance']).round(2)
-        df['Общий итог к оплате клиентом (руб)'] = (df['Остаток за работу (руб)'] - df['Стоимость разницы металла (руб)']).round(2)
         
         df = df.rename(columns={
             'id': 'ID Заказа', 'client_name': 'Клиент', 'item_type': 'Тип изделия', 'probing': 'Проба',
             'material': 'Материал', 'size_length': 'Размер/Длина', 'start_weight': 'Входной вес (г)', 
-            'gold_rate': 'Курс золота (руб/г)', 'advance': 'Внесенный Аванс (руб)', 'end_weight': 'Чистый вес (г)', 
+            'gold_rate': 'Курс золото (руб/г)', 'advance': 'Внесенный Аванс (руб)', 'end_weight': 'Чистый вес (г)', 
             'end_stones_weight': 'Вес камней (г)', 'end_stones': 'Описание камней', 'price': 'Стоимость работы (руб)', 'status': 'Статус заказа'
         })
         
@@ -301,7 +298,6 @@ async def cmd_restore_database(message: Message, state: FSMContext):
     await state.set_state(AdminRestoreState.waiting_db_file)
     await message.answer("📥 Отправьте файл бэкапа базы данных `.db`:")
 
-# ИСПРАВЛЕНО: Вместо несуществующего @dp.document используем корректный фильтр aiogram 3.x
 @dp.message(AdminRestoreState.waiting_db_file, F.document)
 async def process_restore_db(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -680,17 +676,10 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     end_w = data['end_weight']
     gold_rate = data['gold_rate']
     
+    # ПРЯМОЙ РАСЧЕТ УГАРА
     actual_loss = round(start_w - end_w, 3)
-    allowed_consumption = end_w * 1.09
-    difference = round(start_w - allowed_consumption, 3)
+    loss_price = round(actual_loss * gold_rate, 2)
     
-    if difference >= 0:
-        rub_bonus = round(difference * gold_rate, 2)
-        diff_str = f"+{difference} г (Остаток у мастера на +{rub_bonus} руб.)"
-    else:
-        rub_debt = round(abs(difference) * gold_rate, 2)
-        diff_str = f"{difference} г (Перерасход металла на -{rub_debt} руб.)"
-        
     to_pay = round(data['price'] - data['advance'], 2)
     
     conn = sqlite3.connect(DB_NAME)
@@ -710,8 +699,8 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
         f"⚖️ Входной вес металла: {start_w} г\n"
         f"⚖️ Чистый вес готового изделия: {end_w} г\n"
         f"📉 Фактические потери (угар): {actual_loss} г\n"
-        f"📊 Разница (с учетом нормы +9%): {diff_str}\n\n"
-        f"💰 <b>Остаток к оплате за работу: {to_pay} руб.</b> (Аванс: {data['advance']} руб.)"
+        f"💰 Стоимость угара металла: {loss_price} руб.\n\n"
+        f"💸 <b>Остаток к оплате за работу: {to_pay} руб.</b> (Аванс: {data['advance']} руб.)"
     )
     await (message.answer_photo(photo=end_photo_id, caption=caption, parse_mode="HTML") if end_photo_id else message.answer(caption, parse_mode="HTML"))
     await state.clear()
@@ -728,7 +717,7 @@ async def show_active_orders_callback(callback: CallbackQuery):
     conn.close()
     if not orders: return await callback.message.edit_text("📭 Заказов в работе сейчас нет.", reply_markup=back_to_menu_kb)
     response = "📋 <b>Список изделий в работе:</b>\n\n"
-    for o in orders: response += f"🆔 <b>ID: {o[0]}</b> | 👤 {o[1]} | 💍 {o[2]} | 🎨 {o[3]} | ⚖️ {o[4]}г\n"
+    for o in orders: response += f"🆔 <b>ID: {o[0]}</b> | 👤 {o[1]} | 💍 {o[2]} | 🎨 {o[3]} | ⚖ {o[4]}г\n"
     await callback.message.edit_text(response, reply_markup=back_to_menu_kb, parse_mode="HTML")
     await callback.answer()
 
@@ -754,7 +743,7 @@ async def export_to_excel_callback(callback: CallbackQuery):
     filename = f"Ювелирные_Заказы_{callback.from_user.id}.xlsx"
     success = generate_excel_file(callback.from_user.id, filename)
     if not success: return await callback.message.edit_text("База пуста. Добавьте хотя бы один заказ.", reply_markup=back_to_menu_kb)
-    await callback.message.answer_document(document=FSInputFile(filename), caption="📊 Общая таблица заказов сформирована. Колонки автоматически расширены, расчет курса добавлен!")
+    await callback.message.answer_document(document=FSInputFile(filename), caption="📊 Общая таблица заказов сформирована. Расчет стоимости угара металла добавлен!")
     if os.path.exists(filename): os.remove(filename)
     await callback.answer()
 
