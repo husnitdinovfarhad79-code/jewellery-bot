@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # --- НАСТРОЙКА БОТА ---
-TOKEN = "ТВОЙ_ТОКЕН_СЮДА"
+TOKEN = "8731687908:AAF1K5UJjSUbY5Nwgv1ye4gTay36i130GMs"
 ADMIN_ID = 481597187  # Твой Telegram ID для автоматических отчетов (при необходимости)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
