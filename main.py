@@ -69,8 +69,8 @@ def check_subscription(user_id):
     reg_date = datetime.strptime(user[0], "%Y-%m-%d")
     days_passed = (datetime.now() - reg_date).days
     
-    if days_passed <= 1:
-        days_left = 1 - days_passed
+    if days_passed <= 3:
+        days_left = 3 - days_passed
         return True, f"Пробный период (осталось {days_left} дн.)"
         
     if user[1]:
@@ -78,16 +78,21 @@ def check_subscription(user_id):
         if datetime.now() <= pay_till:
             return True, f"Подписка активна до {user[1]}"
             
-    return False, "🔴 Срок действия подписки исчезла"
+    return False, "🔴 Срок действия подписки истек"
 
 # --- МИКРО-СЕРВЕР ДЛЯ RENDER ---
-async def handle(request): return web.Response(text="Ювелирный бот активен!")
+async def handle(request): 
+    return web.Response(text="Ювелирный бот активен!")
+
 async def start_background_web_server():
     app = web.Application()
     app.router.add_get('/', handle)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000))).start()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f" Web-сервер успешно запущен на порту {port}")
 
 # --- АВТОБЭКАПЫ ---
 async def backup_scheduler():
@@ -154,11 +159,11 @@ back_to_menu_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(te
 skip_photo_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⏩ Пропустить фото")]], resize_keyboard=True, one_time_keyboard=True)
 zero_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="0")]], resize_keyboard=True, one_time_keyboard=True)
 
-# БЫСТРЫЕ ОТВЕТЫ ДЛЯ ВСЕХ ШАГОВ
+# ИСПРАВЛЕННЫЕ РУССКИЕ КНОПКИ БЫСТРЫХ ОТВЕТОВ
 item_type_kb = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="Chain Bismarck"), KeyboardButton(text="Anchor Chain")],
-    [KeyboardButton(text="Ring"), KeyboardButton(text="Wedding Ring")],
-    [KeyboardButton(text="Earrings"), KeyboardButton(text="Cross"), KeyboardButton(text="Pendant")],
+    [KeyboardButton(text="Цепь Бисмарк"), KeyboardButton(text="Цепь Якорная")],
+    [KeyboardButton(text="Кольцо"), KeyboardButton(text="Обручальное кольцо")],
+    [KeyboardButton(text="Серьги"), KeyboardButton(text="Крест"), KeyboardButton(text="Подвеска")],
     [KeyboardButton(text="✏️ Другое (Ввести вручную)")]
 ], resize_keyboard=True, one_time_keyboard=True)
 
@@ -607,7 +612,7 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     
     # РАСЧЕТЫ ВЕСА
     loss = round((data['end_weight'] * 1.09) - data['start_weight'], 3)
-    total_metal = round(abs(loss) + data['end_weight'], 3)
+    total_metal = round(bytes(abs(loss)) + data['end_weight'], 3) if hasattr(data, 'abs') else round(abs(loss) + data['end_weight'], 3)
     
     # Формируем строку потерь со скобками в рублях, если ушли в плюс
     loss_str = f"{loss} г"
@@ -718,6 +723,7 @@ async def main():
     init_db()
     await start_background_web_server()
     asyncio.create_task(backup_scheduler())
+    print(" Бот запускает Polling...")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
