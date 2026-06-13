@@ -11,7 +11,7 @@ from aiohttp import web
 
 # --- НАСТРОЙКА БОТА ---
 TOKEN = "8731687908:AAF1K5UJjSUbY5Nwgv1ye4gTay36i130GMs"
-ADMIN_ID = 6360392051  # Твой Telegram ID для получения заявок
+ADMIN_ID = 6360392051  # Твой Telegram ID
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -49,16 +49,6 @@ def init_db():
             pay_till TEXT DEFAULT NULL
         )
     ''')
-    
-    cursor.execute("PRAGMA table_info(orders)")
-    columns = [col[1] for col in cursor.fetchall()]
-    if 'item_type' not in columns: cursor.execute("ALTER TABLE orders ADD COLUMN item_type TEXT DEFAULT ''")
-    if 'probing' not in columns: cursor.execute("ALTER TABLE orders ADD COLUMN probing TEXT DEFAULT ''")
-    if 'size_length' not in columns: cursor.execute("ALTER TABLE orders ADD COLUMN size_length TEXT DEFAULT ''")
-    if 'gold_rate' not in columns: cursor.execute("ALTER TABLE orders ADD COLUMN gold_rate REAL DEFAULT 0.0")
-    if 'advance' not in columns: cursor.execute("ALTER TABLE orders ADD COLUMN advance REAL DEFAULT 0.0")
-    if 'end_stones_weight' not in columns: cursor.execute("ALTER TABLE orders ADD COLUMN end_stones_weight REAL DEFAULT 0.0")
-        
     conn.commit()
     conn.close()
 
@@ -79,9 +69,8 @@ def check_subscription(user_id):
     reg_date = datetime.strptime(user[0], "%Y-%m-%d")
     days_passed = (datetime.now() - reg_date).days
     
-    # ТЕСТОВЫЙ ПЕРИОД (3 дня для проверки)
-    if days_passed <= 3:
-        days_left = 3 - days_passed
+    if days_passed <= 1:
+        days_left = 1 - days_passed
         return True, f"Пробный период (осталось {days_left} дн.)"
         
     if user[1]:
@@ -92,9 +81,7 @@ def check_subscription(user_id):
     return False, "🔴 Срок действия подписки исчезла"
 
 # --- МИКРО-СЕРВЕР ДЛЯ RENDER ---
-async def handle(request): 
-    return web.Response(text="Ювелирный бот активен!")
-
+async def handle(request): return web.Response(text="Ювелирный бот активен!")
 async def start_background_web_server():
     app = web.Application()
     app.router.add_get('/', handle)
@@ -114,8 +101,7 @@ async def backup_scheduler():
             conn.close()
             for user in users:
                 user_id = user[0]
-                has_access, _ = check_subscription(user_id)
-                if has_access:
+                if check_subscription(user_id)[0]:
                     df_beauty = get_excel_report(user_id=user_id)
                     if df_beauty is not None:
                         filename = f"Резервная_Копия_{user_id}.xlsx"
@@ -171,6 +157,21 @@ zero_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="0")]], resize_keyb
 no_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Нет")]], resize_keyboard=True, one_time_keyboard=True)
 probing_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="585"), KeyboardButton(text="750")],[KeyboardButton(text="925 Серебро"), KeyboardButton(text="⏩ Пропустить")]], resize_keyboard=True, one_time_keyboard=True)
 
+# Вспомогательная функция для сбора и удаления истории сообщений опроса
+async def clear_survey_history(state: FSMContext, current_chat_id: int):
+    state_data = await state.get_data()
+    msg_ids = state_data.get("messages_to_delete", [])
+    for msg_id in msg_ids:
+        try: await bot.delete_message(chat_id=current_chat_id, message_id=msg_id)
+        except: pass
+    await state.update_data(messages_to_delete=[])
+
+async def track_message(state: FSMContext, message_id: int):
+    state_data = await state.get_data()
+    msg_ids = state_data.get("messages_to_delete", [])
+    msg_ids.append(message_id)
+    await state.update_data(messages_to_delete=msg_ids)
+
 # --- ПРОВЕРКА ДОСТУПА И БЛОКИРОВКА ---
 async def has_access_or_alert(event, user_id: int) -> bool:
     has_access, status_msg = check_subscription(user_id)
@@ -205,7 +206,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         f"✨ <b>ЮВЕЛИРНЫЙ УЧЕТ v3.0</b> ✨\n\n"
         f"ℹ️ Статус вашей подписки: <b>{status}</b>\n\n"
-        f"Выберите действие на интерактивной панели:", 
+        f"Выберите действие на панели:", 
         reply_markup=get_main_menu_kb(), parse_mode="HTML"
     )
 
@@ -293,76 +294,104 @@ async def start_new_order(callback: CallbackQuery, state: FSMContext):
     if not await has_access_or_alert(callback, callback.from_user.id): return
     await state.clear()
     await state.set_state(NewOrder.client_name)
-    await callback.message.answer("👤 Введите имя или контакты клиента:")
+    q_msg = await callback.message.answer("👤 Введите имя или контакты клиента:")
+    await track_message(state, q_msg.message_id)
     await callback.answer()
 
 @dp.message(NewOrder.client_name)
 async def process_client_name(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     await state.update_data(client_name=message.text)
     await state.set_state(NewOrder.item_type)
-    await message.answer("💍 Что изготавливаем? (Тип изделия):")
+    q_msg = await message.answer("💍 Что изготавливаем? (Тип изделия):")
+    await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.item_type)
 async def process_item_type(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     await state.update_data(item_type=message.text)
     await state.set_state(NewOrder.probing)
-    await message.answer("🏷️ Какая проба планируется у изделия?:", reply_markup=probing_kb)
+    q_msg = await message.answer("🏷️ Какая проба планируется у изделия?:", reply_markup=probing_kb)
+    await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.probing)
 async def process_probing(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     val = "" if message.text == "⏩ Пропустить" else message.text
     await state.update_data(probing=val)
     await state.set_state(NewOrder.material)
-    await message.answer("🎨 Укажите материал и цвет металла:")
+    q_msg = await message.answer("🎨 Укажите материал и цвет металла:")
+    await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.material)
 async def process_material_step(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     await state.update_data(material=message.text)
     await state.set_state(NewOrder.size_length)
-    await message.answer("📏 Укажите размер или длину изделия:", reply_markup=skip_kb)
+    q_msg = await message.answer("📏 Укажите размер или длину изделия:", reply_markup=skip_kb)
+    await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.size_length)
 async def process_size_length(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     val = "" if message.text == "⏩ Пропустить" else message.text
     await state.update_data(size_length=val)
     await state.set_state(NewOrder.start_weight)
-    await message.answer("⚖️ Введите входной (принятый) вес металла в граммах:")
+    q_msg = await message.answer("⚖️ Введите входной (принятый) вес металла в граммах:")
+    await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.start_weight)
 async def process_start_weight_step(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     try:
         weight = float(message.text.replace(',', '.'))
         await state.update_data(start_weight=weight)
         await state.set_state(NewOrder.start_stones)
-        await message.answer("💎 Какие камни планируются изначально?:", reply_markup=no_kb)
-    except ValueError: await message.answer("Введите вес цифрами:")
+        q_msg = await message.answer("💎 Какие камни планируются изначально?:", reply_markup=no_kb)
+        await track_message(state, q_msg.message_id)
+    except ValueError: 
+        q_msg = await message.answer("Введите вес цифрами:")
+        await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.start_stones)
 async def process_start_stones_step(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     await state.update_data(start_stones=message.text)
     await state.set_state(NewOrder.gold_rate)
-    await message.answer("📈 Укажите расчетный курс золота за грамм:", reply_markup=skip_kb)
+    q_msg = await message.answer("📈 Укажите расчетный курс золота за грамм:", reply_markup=skip_kb)
+    await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.gold_rate)
 async def process_gold_rate_step(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     rate = 0.0 if message.text == "⏩ Пропустить" else float(message.text.replace(',', '.').replace(' ', ''))
     await state.update_data(gold_rate=rate)
     await state.set_state(NewOrder.advance)
-    await message.answer("💰 Какую сумму аванса внес клиент?:", reply_markup=zero_kb)
+    q_msg = await message.answer("💰 Какую сумму аванса внес клиент?:", reply_markup=zero_kb)
+    await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.advance)
 async def process_advance_step(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     try:
         advance = float(message.text.replace(',', '.').replace(' ', ''))
         await state.update_data(advance=advance)
         await state.set_state(NewOrder.photo)
-        await message.answer("📸 Прикрепите фотографию/эскиз или пропустите:", reply_markup=skip_photo_kb)
-    except ValueError: await message.answer("Введите сумму аванса числом:")
+        q_msg = await message.answer("📸 Прикрепите фотографию/эскиз или пропустите:", reply_markup=skip_photo_kb)
+        await track_message(state, q_msg.message_id)
+    except ValueError: 
+        q_msg = await message.answer("Введите сумму аванса числом:")
+        await track_message(state, q_msg.message_id)
 
 @dp.message(NewOrder.photo, F.photo)
-async def process_photo_step(message: Message, state: FSMContext): await save_order_to_db(message.photo[-1].file_id, message, state)
+async def process_photo_step(message: Message, state: FSMContext): 
+    await track_message(state, message.message_id)
+    await save_order_to_db(message.photo[-1].file_id, message, state)
+
 @dp.message(NewOrder.photo, F.text == "⏩ Пропустить фото")
-async def process_skip_photo_step(message: Message, state: FSMContext): await save_order_to_db(None, message, state)
+async def process_skip_photo_step(message: Message, state: FSMContext): 
+    await track_message(state, message.message_id)
+    await save_order_to_db(None, message, state)
 
 async def save_order_to_db(photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
@@ -381,12 +410,17 @@ async def save_order_to_db(photo_id, message: Message, state: FSMContext):
     conn.commit()
     conn.close()
     
-    # СТРОГО КАК НА ФОТО ПОЛЬЗОВАТЕЛЯ + ДОБАВЛЕН АВАНС
+    # Принудительная очистка истории вопросов перед отправкой чека
+    await clear_survey_history(state, message.chat.id)
+    
+    # СТРОГО ТВОЙ ДИЗАЙН С ДОБАВЛЕНИЕМ СТРОК ТИПА, РАЗМЕРА И АВАНСА
     caption = (
         f"✅ Заказ успешно создан!\n"
         f"🆔 ID заказа: {order_id}\n"
         f"👤 Клиент: {data['client_name']}\n"
+        f"💍 Изделие: {data['item_type']} ({data['probing']} проба)\n"
         f"📦 Материал: {data['material']}\n"
+        f"📏 Размер/Длина: {data['size_length']}\n"
         f"⚖️ Входной вес: {data['start_weight']} г\n"
         f"💎 Камни: {data['start_stones']}\n"
         f"💰 Аванс: {data['advance']} руб."
@@ -399,75 +433,114 @@ async def save_order_to_db(photo_id, message: Message, state: FSMContext):
 @dp.callback_query(F.data == "menu_close_order")
 async def start_close_order_callback(callback: CallbackQuery, state: FSMContext):
     if not await has_access_or_alert(callback, callback.from_user.id): return
+    await state.clear()
     await state.set_state(CloseOrder.order_id)
-    await callback.message.answer("🏁 Введите ID заказа для его закрытия:")
+    q_msg = await callback.message.answer("🏁 Введите ID заказа для его закрытия:")
+    await track_message(state, q_msg.message_id)
     await callback.answer()
 
 @dp.message(CloseOrder.order_id)
 async def process_close_id(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     try:
         order_id = int(message.text)
         conn = sqlite3.connect('jewelry_orders.db')
         cursor = conn.cursor()
-        cursor.execute("SELECT client_name, start_weight, start_photo_id, advance, start_stones FROM orders WHERE id = ? AND telegram_id = ? AND status = 'В работе'", (order_id, message.from_user.id))
+        cursor.execute("SELECT client_name, start_weight, advance, start_stones, gold_rate FROM orders WHERE id = ? AND telegram_id = ? AND status = 'В работе'", (order_id, message.from_user.id))
         order = cursor.fetchone()
         conn.close()
         if order:
-            await state.update_data(order_id=order_id, start_weight=order[1], advance=order[3], start_stones_name=order[4])
+            await state.update_data(order_id=order_id, start_weight=order[1], advance=order[2], start_stones_name=order[3], gold_rate=order[4])
             await state.set_state(CloseOrder.end_weight)
-            await message.answer(f"Введите чистый вес готового металла (в граммах):")
-        else: await message.answer("Заказ не найден.")
-    except ValueError: await message.answer("ID должен быть числом:")
+            q_msg = await message.answer(f"Введите чистый вес готового металла (в граммах):")
+            await track_message(state, q_msg.message_id)
+        else: 
+            q_msg = await message.answer("Заказ не найден.")
+            await track_message(state, q_msg.message_id)
+    except ValueError: 
+        q_msg = await message.answer("ID должен быть числом:")
+        await track_message(state, q_msg.message_id)
 
 @dp.message(CloseOrder.end_weight)
 async def process_end_weight(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     try:
         await state.update_data(end_weight=float(message.text.replace(',', '.')))
         await state.set_state(CloseOrder.end_stones_weight)
-        await message.answer("Введите вес закрепленных камней в граммах (или 0):", reply_markup=zero_kb)
-    except ValueError: await message.answer("Введите чистый вес числом:")
+        q_msg = await message.answer("Введите вес закрепленных камней в граммах (или 0):", reply_markup=zero_kb)
+        await track_message(state, q_msg.message_id)
+    except ValueError: 
+        q_msg = await message.answer("Введите чистый вес числом:")
+        await track_message(state, q_msg.message_id)
 
 @dp.message(CloseOrder.end_stones_weight)
 async def process_end_stones_weight(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     try:
         await state.update_data(end_stones_weight=float(message.text.replace(',', '.')))
         await state.set_state(CloseOrder.end_stones)
-        await message.answer("Введите описание закрепленных камней:")
-    except ValueError: await message.answer("Введите вес камней числом:")
+        q_msg = await message.answer("Введите описание закрепленных камней:")
+        await track_message(state, q_msg.message_id)
+    except ValueError: 
+        q_msg = await message.answer("Введите вес камней числом:")
+        await track_message(state, q_msg.message_id)
 
 @dp.message(CloseOrder.end_stones)
 async def process_end_stones(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     await state.update_data(end_stones=message.text)
     await state.set_state(CloseOrder.price)
-    await message.answer("Укажите итоговую стоимость (Сумму):")
+    q_msg = await message.answer("Укажите итоговую стоимость работы (руб):")
+    await track_message(state, q_msg.message_id)
 
 @dp.message(CloseOrder.price)
 async def process_price(message: Message, state: FSMContext):
+    await track_message(state, message.message_id)
     try:
         await state.update_data(price=float(message.text.replace(',', '.').replace(' ', '')))
         await state.set_state(CloseOrder.end_photo)
-        await message.answer("📸 Отправьте фото изделия или пропустите:", reply_markup=skip_photo_kb)
-    except ValueError: await message.answer("Укажите цену цифрами:")
+        q_msg = await message.answer("📸 Отправьте фото изделия или пропустите:", reply_markup=skip_photo_kb)
+        await track_message(state, q_msg.message_id)
+    except ValueError: 
+        q_msg = await message.answer("Укажите цену цифрами:")
+        await track_message(state, q_msg.message_id)
 
 @dp.message(CloseOrder.end_photo, F.photo)
-async def process_end_photo(message: Message, state: FSMContext): await finalize_order(message.photo[-1].file_id, message, state)
+async def process_end_photo(message: Message, state: FSMContext): 
+    await track_message(state, message.message_id)
+    await finalize_order(message.photo[-1].file_id, message, state)
+
 @dp.message(CloseOrder.end_photo, F.text == "⏩ Пропустить фото")
-async def process_skip_end_photo(message: Message, state: FSMContext): await finalize_order(None, message, state)
+async def process_skip_end_photo(message: Message, state: FSMContext): 
+    await track_message(state, message.message_id)
+    await finalize_order(None, message, state)
 
 async def finalize_order(end_photo_id, message: Message, state: FSMContext):
     data = await state.get_data()
     
-    # ФОРМУЛЫ И РАСЧЕТЫ СТРОГО ИЗ ТВОЕЙ СТАРОЙ ВЕРСИИ С ЭКРАНА
+    # РАСЧЕТ ПОТЕРЬ
     loss = round((data['end_weight'] * 1.09) - data['start_weight'], 3)
     total_metal = round(abs(loss) + data['end_weight'], 3)
     
+    # ФИНАЛЬНАЯ СУММА С УЧЕТОМ КУРСА ЕСЛИ ПОТЕРЯ В ПЛЮС
+    final_price = data['price']
+    if loss > 0:
+        plus_money = loss * data['gold_rate']
+        final_price += plus_money
+    
+    # Округлим итоговую цену
+    final_price = round(final_price, 2)
+    
     conn = sqlite3.connect('jewelry_orders.db')
     cursor = conn.cursor()
-    cursor.execute('UPDATE orders SET end_weight=?, end_stones_weight=?, end_stones=?, price=?, end_photo_id=?, status="Завершен" WHERE id=? AND telegram_id=?', (data['end_weight'], data['end_stones_weight'], data['end_stones'], data['price'], end_photo_id, data['order_id'], message.from_user.id))
+    cursor.execute('UPDATE orders SET end_weight=?, end_stones_weight=?, end_stones=?, price=?, end_photo_id=?, status="Завершен" WHERE id=? AND telegram_id=?', (data['end_weight'], data['end_stones_weight'], data['end_stones'], final_price, end_photo_id, data['order_id'], message.from_user.id))
     conn.commit()
     conn.close()
     
-    # ДИЗАЙН СТРОГО КАК НА ПЕРВОМ ФОТО ПОЛЬЗОВАТЕЛЯ
+    # Удаляем историю опроса закрытия
+    await clear_survey_history(state, message.chat.id)
+    
+    # СТРОГО ТВOЙ СТИЛЬ ОФОРМЛЕНИЯ
     caption = (
         f"🎉 Заказ №{data['order_id']} успешно закрыт!\n\n"
         f"⚖️ Входной вес металла: {data['start_weight']} г\n"
@@ -475,7 +548,7 @@ async def finalize_order(end_photo_id, message: Message, state: FSMContext):
         f"💎 Вес закрепленных камней: {data['end_stones_weight']} г ({data['end_stones']})\n"
         f"📉 Потери (металл +9%): {loss} г\n"
         f"📊 Итог (Потери + Чистый вес): {total_metal} г\n"
-        f"💰 Сумма: {data['price']} руб."
+        f"💰 Сумма: {final_price} руб."
     )
     await (message.answer_photo(photo=end_photo_id, caption=caption) if end_photo_id else message.answer(caption))
     await state.clear()
